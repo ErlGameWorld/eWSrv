@@ -53,7 +53,7 @@ request(header, Data, Socket, State) ->
                            request(header, Rest, Socket, State#wsState{buffer = Rest, headerCnt = NewHeaderCnt, temHeader = NewTemHeader, contentLength = ContentLength})
                      end;
                   'Transfer-Encoding' ->
-                     IsChunked = ?IIF(Value == <<"chunked">> orelse Value == <<"Chunked">>, true, false),
+                     IsChunked = ?CASE(Value == <<"chunked">> orelse Value == <<"Chunked">>, true, false),
                      case IsChunked of
                         true ->
                            case ChunkedSupp of

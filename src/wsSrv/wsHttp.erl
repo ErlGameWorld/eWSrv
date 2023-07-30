@@ -150,7 +150,7 @@ handleMsg({?mSockReady, Sock}, State) ->
    inet:setopts(Sock, [{packet, raw}, {active, true}]),
    {ok, State#wsState{socket = Sock}};
 handleMsg({?mSockReady, Sock, SslOpts, SslHSTet}, State) ->
-   case wsSslAcceptor:handshake(Sock, SslOpts, SslHSTet) of
+   case ntSslAcceptor:handshake(Sock, SslOpts, SslHSTet) of
       {ok, SslSock} ->
          ssl:setopts(Sock, [{packet, raw}, {active, true}]),
          {ok, State#wsState{socket = SslSock, isSsl = true}};

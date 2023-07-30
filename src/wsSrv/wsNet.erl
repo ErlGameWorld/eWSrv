@@ -11,7 +11,7 @@
 ]).
 
 send(Socket, Data) when is_port(Socket) ->
-   gen_tcp:send(Socket, Data);
+   ntCom:syncSend(Socket, Data);
 send(Socket, Data) ->
    ssl:send(Socket, Data).
 

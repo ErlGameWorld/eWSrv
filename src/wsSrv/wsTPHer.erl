@@ -273,14 +273,14 @@ close_chunk(Ref) ->
 %% If the referenced process is dead, return early with `{error, closed}',
 %% instead of timing out.
 send_chunk(Ref, Data) ->
-   ?IIF(is_ref_alive(Ref),
+   ?CASE(is_ref_alive(Ref),
       send_chunk(Ref, Data, 5000),
       {error, closed}).
 
 is_ref_alive(Ref) ->
-   ?IIF(node(Ref) =:= node(),
+   ?CASE(node(Ref) =:= node(),
       is_process_alive(Ref),
-      rpc:call(node(Ref), erlang, is_process_alive, [Ref])).
+      erpc:call(node(Ref), erlang, is_process_alive, [Ref])).
 
 send_chunk(Ref, Data, Timeout) ->
    Ref ! {chunk, Data, self()},

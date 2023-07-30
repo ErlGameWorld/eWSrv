@@ -19,7 +19,7 @@
    , {backlog, 4096}
 ]).
 
--define(IIF(Cond, Then, That), case Cond of true -> Then; _ -> That end).
+-define(CASE(Cond, Then, That), case Cond of true -> Then; _ -> That end).
 
 -export_type([
    sendfile_opts/0

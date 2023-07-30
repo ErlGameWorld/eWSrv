@@ -57,5 +57,5 @@ openSrv(WSrvName, Port, WsOpts) ->
    end.
 
 closeSrv(WSrvNameOrPort) ->
-   WSrvName = ?IIF(is_integer(WSrvNameOrPort),  wSrvName(WSrvNameOrPort), WSrvNameOrPort),
+   WSrvName = ?CASE(is_integer(WSrvNameOrPort),  wSrvName(WSrvNameOrPort), WSrvNameOrPort),
    eNet:close(WSrvName).
