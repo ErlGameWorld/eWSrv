@@ -1,294 +1,465 @@
 -module(wsTPHer).
-
--behaviour(wsHer).
-
 -include("wsCom.hrl").
 -include_lib("kernel/include/file.hrl").
+-export([handle/3, handleMsg/3, supportedProtocols/0, supportedExtensions/0]).
 
--export([
-   handle/3
-]).
+handle(Method, Path, WsReq) ->
+	io:format("IMY************handle ~p ~p ~0p~n", [Method, Path, WsReq]),
+	Response = doHandle(Method, Path, WsReq),
+	io:format("IMY************Response ~0p~n", [Response]),
+	Response.
 
--export([
-   chunk_loop/1
-]).
+%% 主要的请求处理函数
+%% 主路由
 
--spec handle(Method :: wsMethod(), Path :: wsPath(), WsReq :: wsReq()) -> wsHer:response().
-handle('GET', <<"/hello/world">>, WsReq) ->
-   io:format("IMY************XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX ~n receive WsReq: ~p~n", [WsReq]),
-   %% Reply with a normal response.
-   %timer:sleep(1000),
-   {ok, [], <<"Hello World!">>};
+doHandle('GET', <<"/">>, _WsReq) ->
+	FilePath = filename:join([code:priv_dir(eWSrv), "test.html"]),
+	case file:read_file(FilePath, [raw]) of
+		{ok, TestHtml} ->
+			{ok, [{<<"Content-Type">>, <<"text/html">>}], TestHtml};
+		{error, _} ->
+			Msg = <<"Welcome to eWSrv!">>,
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}], Msg}
+	end;
 
-handle('GET', <<"/hello">>, WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Fetch a GET argument from the URL.
-   Name = proplists:get_value(<<"name">>, WsReq, <<"undefined">>),
-   {ok, [], <<"Hello ", Name/binary>>};
+doHandle('GET', <<"/ip">>, WsReq) ->
+	#wsReq{socket = Socket} = WsReq,
+	case wsNet:peername(Socket) of
+		{ok, {IP, Port}} ->
+			{A, B, C, D} = IP,
+			Msg = iolist_to_binary([
+				<<"Your IP: ">>, integer_to_binary(A), <<".">>,
+				integer_to_binary(B), <<".">>,
+				integer_to_binary(C), <<".">>,
+				integer_to_binary(D), <<":">>,
+				integer_to_binary(Port)
+			]),
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}], Msg};
+		{error, _} ->
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}], <<"Unable to get peer info">>}
+	end;
 
-handle('POST', <<"hello">>, WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Fetch a POST argument from the POST body.
-   Name = proplists:get_value(<<"name">>, WsReq, <<"undefined">>),
-   %% Fetch and decode
-   City = proplists:get_value(<<"city">>, WsReq, <<"undefined">>),
-   {ok, [], <<"Hello ", Name/binary, " of ", City/binary>>};
+doHandle('GET', <<"/html">>, _WsReq) ->
+	FilePath = filename:join([code:priv_dir(eWSrv), "test.html"]),
+	case file:read_file(FilePath, [raw]) of
+		{ok, TestHtml} ->
+			{ok, [{<<"Content-Type">>, <<"text/html">>}], TestHtml};
+		{error, _} ->
+			Msg = <<"Welcome to eWSrv!">>,
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}], Msg}
+	end;
 
-handle('GET', [<<"hello">>, <<"iolist">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Iolists will be kept as iolists all the way to the socket.
-   Name = proplists:get_value(<<"name">>, WsReq),
-   {ok, [], [<<"Hello ">>, Name]};
+doHandle('GET', <<"/status/", Code/binary>>, _WsReq) ->
+	{binary_to_integer(Code), [{<<"Content-Type">>, <<"text/plain">>}], wsHttp:status(binary_to_integer(Code))};
 
-handle('GET', [<<"type">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   Name = proplists:get_value(<<"name">>, WsReq),
-   %% Fetch a header.
-   case proplists:get_value(<<"Accept">>, WsReq, <<"text/plain">>) of
-      <<"text/plain">> ->
-         {ok, [{<<"content-type">>, <<"text/plain; charset=ISO-8859-1">>}],
-            <<"name: ", Name/binary>>};
-      <<"application/json">> ->
-         {ok, [{<<"content-type">>,
-            <<"application/json; charset=ISO-8859-1">>}],
-            <<"{\"name\" : \"", Name/binary, "\"}">>}
-   end;
+doHandle('GET', <<"/hello">>, _WsReq) ->
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], <<"Hello, World!">>};
 
-handle('GET', [<<"headers.html">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Set custom headers, for example 'Content-Type'
-   {ok, [{<<"X-Custom">>, <<"foobar">>}], <<"see headers">>};
+doHandle('GET', <<"/error">>, _WsReq) ->
+	{500, [], <<"Internal Server Error">>};
 
-%% See note in function doc re: overriding Elli's default behaviour
-%% via Connection and Content-Length headers.
-handle('GET', [<<"user">>, <<"defined">>, <<"behaviour">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {304, [{<<"Connection">>, <<"close">>},
-      {<<"Content-Length">>, <<"123">>}], <<"ignored">>};
+doHandle('GET', <<"/crash">>, _WsReq) ->
+	erlang:error(intentional_crash);
 
-handle('GET', [<<"user">>, <<"content-length">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {200, [{<<"Content-Length">>, 123}], <<"foobar">>};
+doHandle('GET', <<"/timeout">>, _WsReq) ->
+	timer:sleep(60000),  % 60秒超时
+	{ok, [], <<"This should timeout">>};
 
-handle('GET', [<<"crash">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Throwing an exception results in a 500 response and
-   %% request_throw being called
-   throw(foobar);
+doHandle('GET', <<"/json">>, _WsReq) ->
+	Json = <<"{\"message\": \"Hello, JSON!\", \"timestamp\": ">>,
+	Ts = integer_to_binary(erlang:system_time(second)),
+	Json2 = <<Json/binary, Ts/binary, "}">>,
+	{ok, [{<<"Content-Type">>, <<"application/json">>}], Json2};
 
-handle('GET', [<<"decoded-hello">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Fetch a URI decoded GET argument from the URL.
-   Name = proplists:get_value(<<"name">>, WsReq, <<"undefined">>),
-   {ok, [], <<"Hello ", Name/binary>>};
+doHandle('GET', <<"/compressed">>, _WsReq) ->
+	%% 生成一个较大的响应体以测试压缩效果
+	Body = binary:copy(<<"Hello World!">>, 86),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Body};
 
-handle('GET', [<<"decoded-list">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {ok, [], <<"Hello">>};
+doHandle('GET', <<"/params">>, WsReq) ->
+	#wsReq{args = Args} = WsReq,
+	Formatted = formatArgs(Args),
+	Resp = iolist_to_binary([<<"Query parameters:\n">>, Formatted]),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Resp};
+
+doHandle('GET', <<"/headers">>, WsReq) ->
+	#wsReq{headers = Headers} = WsReq,
+	Lines = <<<<(wsHttp:toBinStr(Name))/binary, ": ", (wsHttp:toBinStr(Value))/binary, "\n">> || {Name, Value} <- Headers>>,
+	Resp = iolist_to_binary([<<"Request headers:\n">>, Lines]),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Resp};
+
+doHandle('GET', <<"/stream">>, _WsReq) ->
+	Self = self(),
+	spawn(fun() ->
+		Self ! {chunk, <<"Stream started\n">>},
+		timer:sleep(1000),
+		Self ! {chunk, <<"part-1\n">>},
+		timer:sleep(1000),
+		Self ! {chunk, <<"part-2\n">>},
+		timer:sleep(1000),
+		Self ! {chunk, <<"part-3\n">>},
+		Self ! {chunk, close}
+	end),
+	Headers = [
+		{<<"Content-Type">>, <<"text/plain">>},
+		{<<"X-Stream">>, <<"true">>}
+	],
+	{chunk, Headers};
+
+doHandle('GET', <<"/chunk">>, _WsReq) ->
+	scheduleChunks(self()),
+	Headers = [
+		{<<"Content-Type">>, <<"text/plain">>},
+		{<<"Transfer-Encoding">>, <<"chunked">>}
+	],
+	{chunk, Headers};
+
+doHandle('GET', <<"/file">>, _WsReq) ->
+	FilePath = filename:join([code:priv_dir(eWSrv), "server_cert.pem"]),
+	case file:read_file(FilePath, [raw]) of
+		{ok, Data} ->
+			{ok, [
+				{<<"Content-Type">>, <<"application/x-pem-file">>},
+				{<<"Content-Disposition">>, <<"attachment; filename=server_cert.pem">>}
+			], Data};
+		{error, Reason} ->
+			Err = io_lib:format("Failed to read file: ~p", [Reason]),
+			{500, [{<<"Content-Type">>, <<"text/plain">>}], list_to_binary(Err)}
+	end;
+
+doHandle('GET', <<"/range">>, WsReq) ->
+	#wsReq{headers = Headers} = WsReq,
+	FilePath = filename:join([code:priv_dir(eWSrv), "server_cert.pem"]),
+	case file:read_file(FilePath) of
+		{ok, Data} ->
+			Total = byte_size(Data),
+			case parseRangeHeader(Headers) of
+				{Start, undefined} when Start < Total ->
+					Slice = binary:part(Data, Start, Total - Start),
+					{206, [
+						{<<"Content-Range">>, iolist_to_binary([<<"bytes ">>, integer_to_binary(Start), <<"-">>, integer_to_binary(Total - 1), <<"/">>, integer_to_binary(Total)])}
+					], Slice};
+				{Start, End} when Start < Total, End < Total, End >= Start ->
+					Length = End - Start + 1,
+					Slice = binary:part(Data, Start, Length),
+					{206, [
+						{<<"Content-Range">>, iolist_to_binary([<<"bytes ">>, integer_to_binary(Start), <<"-">>, integer_to_binary(End), <<"/">>, integer_to_binary(Total)])}
+					], Slice};
+				invalid_range ->
+					{416, [{<<"Content-Range">>, iolist_to_binary([<<"bytes */">>, integer_to_binary(Total)])}], <<>>};
+				undefined ->
+					{200, [], Data}
+			end;
+		{error, Reason} ->
+			Err = io_lib:format("Failed to read file: ~p", [Reason]),
+			{500, [{<<"Content-Type">>, <<"text/plain">>}], list_to_binary(Err)}
+	end;
+
+doHandle('GET', <<"/cache">>, WsReq) ->
+	#wsReq{headers = Headers} = WsReq,
+	FilePath = filename:join([code:priv_dir(eWSrv), "server_cert.pem"]),
+	case file:read_file_info(FilePath) of
+		{ok, #file_info{mtime = MTime, size = Size}} ->
+			LastModified = format_rfc1123(MTime),
+			TS = calendar:datetime_to_gregorian_seconds(MTime),
+			ETag = iolist_to_binary([<<"\"">>, integer_to_binary(Size), <<"-">>, integer_to_binary(TS), <<"\"">>]),
+			CacheCtl = <<"public, max-age=60">>,
+			IfNoneMatch = wsUtil:getHeader('If-None-Match', Headers, undefined),
+			IfModSince = wsUtil:getHeader('If-Modified-Since', Headers, undefined),
+			CommonHeaders = [
+				{<<"ETag">>, ETag},
+				{<<"Cache-Control">>, CacheCtl},
+				{<<"Last-Modified">>, LastModified},
+				{<<"Content-Type">>, <<"text/plain">>}
+			],
+			case {IfNoneMatch, IfModSince} of
+				{ETag, _} -> {304, CommonHeaders, <<>>};
+				{_, LastModified} -> {304, CommonHeaders, <<>>};
+				_ -> {ok, CommonHeaders, <<"Cache test content">>}
+			end;
+		{error, Reason} ->
+			Err = io_lib:format("Failed to stat file: ~p", [Reason]),
+			{500, [{<<"Content-Type">>, <<"text/plain">>}], list_to_binary(Err)}
+	end;
+
+doHandle('GET', <<"/redirect">>, _WsReq) ->
+	{301, [{<<"Location">>, <<"/">>}], <<"Redirecting to /">>};
+
+doHandle('POST', <<"/echo">>, WsReq) ->
+	#wsReq{body = Body} = WsReq,
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Body};
+
+doHandle('POST', <<"/upload">>, WsReq) ->
+	#wsReq{body = Body, headers = Headers} = WsReq,
+	ContentType = wsUtil:getHeader('Content-Type', Headers, <<"">>),
+	case binary:match(ContentType, <<"multipart/form-data">>) of
+		{_, _} ->
+			Size = byte_size(Body),
+			Response = iolist_to_binary([<<"Upload received, size: ">>, integer_to_binary(Size), <<" bytes">>]),
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}], Response};
+		nomatch ->
+			{400, [], <<"Expected multipart/form-data content type">>}
+	end;
+
+doHandle('POST', <<"/form">>, WsReq) ->
+	#wsReq{body = Body} = WsReq,
+	Pairs = parseFormData(Body),
+	Resp = iolist_to_binary([<<"Form received:\n">>, [[K, <<"=">>, V, <<"\n">>] || {K, V} <- Pairs]]),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Resp};
+
+doHandle('POST', <<"/json">>, WsReq) ->
+	#wsReq{body = Body} = WsReq,
+	Resp = iolist_to_binary([<<"Received JSON body of size ">>, integer_to_binary(byte_size(Body))]),
+	{ok, [{<<"Content-Type">>, <<"application/json">>}], Resp};
+
+doHandle('PUT', <<"/resource/", Id/binary>>, WsReq) ->
+	#wsReq{headers = Headers, body = Body} = WsReq,
+	Size = integer_to_binary(byte_size(Body)),
+	Resp = iolist_to_binary([<<"PUT resource ">>, Id, <<" with ">>, Size, <<" bytes\nHeaders:\n">>, [[wsHttp:toBinStr(N), <<": ">>, wsHttp:toBinStr(V), <<"\n">>] || {N, V} <- Headers]]),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Resp};
+
+doHandle('PATCH', <<"/resource/", Id/binary>>, WsReq) ->
+	#wsReq{body = Body} = WsReq,
+	Size = integer_to_binary(byte_size(Body)),
+	Json = list_to_binary(io_lib:format("{\"id\": \"~s\", \"updated\": true, \"bytes\": ~s}", [Id, Size])),
+	{ok, [{<<"Content-Type">>, <<"application/json">>}], Json};
+
+doHandle('PUT', Path, WsReq) ->
+	#wsReq{body = Body} = WsReq,
+	Response = iolist_to_binary([<<"PUT to ">>, Path, <<", body size: ">>, integer_to_binary(byte_size(Body))]),
+	{ok, [], Response};
+
+doHandle('DELETE', <<"/resource/", Id/binary>>, _WsReq) ->
+	Json = list_to_binary(io_lib:format("{\"id\": \"~s\", \"deleted\": true}", [Id])),
+	{ok, [{<<"Content-Type">>, <<"application/json">>}], Json};
+
+doHandle('DELETE', Path, _WsReq) ->
+	Response = iolist_to_binary([<<"DELETE request for: ">>, Path]),
+	{ok, [{<<"Content-Type">>, <<"text/plain">>}], Response};
+
+doHandle('HEAD', <<"/resource/", Id/binary>>, _WsReq) ->
+	Json = list_to_binary(io_lib:format("{\"id\": \"~s\", \"exists\": true, \"size\": 1024}", [Id])),
+	{ok, [{<<"Content-Type">>, <<"application/json">>}], Json};
+
+doHandle('HEAD', Path, WsReq) ->
+	case doHandle('GET', Path, WsReq) of
+		{ok, Headers, _Body} ->
+			{ok, Headers, _Body};
+		{error, Status, Headers, _Body} ->
+			{Status, Headers, _Body};
+		{Code, Headers, _Body} ->
+			{Code, Headers, _Body}
+	end;
+
+doHandle('OPTIONS', <<"/api/", _/binary>>, _WsReq) ->
+	Headers = [
+		{<<"Access-Control-Allow-Origin">>, <<"*">>},
+		{<<"Access-Control-Allow-Methods">>, <<"GET, POST, PUT, DELETE, HEAD, OPTIONS">>},
+		{<<"Access-Control-Allow-Headers">>, <<"Content-Type, Authorization">>},
+		{<<"Access-Control-Max-Age">>, <<"86400">>}
+	],
+	{ok, Headers, <<"">>};
+
+doHandle('OPTIONS', Path, _WsReq) ->
+	Methods = case Path of
+		<<"/resource/", _Id/binary>> -> [<<"GET">>, <<"PUT">>, <<"DELETE">>, <<"HEAD">>, <<"OPTIONS">>];
+		_ -> [<<"GET">>, <<"POST">>, <<"HEAD">>, <<"OPTIONS">>]
+	end,
+	Allow = iolist_to_binary(lists:join(<<", ">>, Methods)),
+	{ok, [
+		{<<"Allow">>, Allow},
+		{<<"Access-Control-Allow-Methods">>, Allow},
+		{<<"Access-Control-Allow-Headers">>, <<"Content-Type, Authorization">>},
+		{<<"Access-Control-Max-Age">>, <<"86400">>}
+	], <<>>};
+
+doHandle('GET', <<"/api/test">>, WsReq) ->
+	#wsReq{headers = Headers} = WsReq,
+	Origin = wsUtil:getHeader('Origin', Headers, <<"*">>),
+	Resp = iolist_to_binary([<<"CORS GET OK">>]),
+	{ok, [
+		{<<"Access-Control-Allow-Origin">>, Origin},
+		{<<"Vary">>, <<"Origin">>},
+		{<<"Content-Type">>, <<"text/plain">>}
+	], Resp};
+
+doHandle('POST', <<"/api/data">>, WsReq) ->
+	#wsReq{headers = Headers, body = Body} = WsReq,
+	Origin = wsUtil:getHeader('Origin', Headers, <<"*">>),
+	Len = integer_to_binary(byte_size(Body)),
+	Json = list_to_binary(io_lib:format('{"ok":true,"bytes":~s}', [Len])),
+	{ok, [
+		{<<"Access-Control-Allow-Origin">>, Origin},
+		{<<"Access-Control-Allow-Headers">>, <<"Content-Type, Authorization">>},
+		{<<"Access-Control-Allow-Methods">>, <<"GET, POST, OPTIONS">>},
+		{<<"Vary">>, <<"Origin">>},
+		{<<"Content-Type">>, <<"application/json">>}
+	], Json};
+
+doHandle('GET', <<"/ws">>, WsReq) ->
+	%% 检查是否为WebSocket升级请求
+	case wsWebSocket:tryWsUpgrade(WsReq) of
+		{ok, Headers} ->
+			{wsUpgrade, Headers};
+		{error, Reason} ->
+			%% 返回普通的HTTP响应
+			{502, [], Reason}
+	end;
+
+doHandle(_Method, _Path, _WsReq) ->
+	{404, [], <<"Not Found">>}.
+
+%% 辅助函数
+formatValue(Value) when is_binary(Value) -> Value;
+formatValue(Value) when is_list(Value) -> list_to_binary(Value);
+formatValue(Value) when is_atom(Value) -> atom_to_binary(Value, utf8);
+formatValue(Value) -> iolist_to_binary(io_lib:format("~p", [Value])).
+
+parseFormData(Body) ->
+	Pairs = binary:split(Body, <<"&">>, [global]),
+	lists:map(fun(Pair) ->
+		case binary:split(Pair, <<"=">>) of
+			[Key, Value] -> {Key, Value};
+			[Key] -> {Key, <<"">>}
+		end
+	end, Pairs).
+
+formatArgs(Args) ->
+	lists:map(fun formatArg/1, Args).
+
+formatArg({Key, Value}) ->
+	[Key, <<" = ">>, formatValue(Value), <<"\n">>].
+
+parseRangeHeader(Headers) ->
+	case wsUtil:getHeader('Range', Headers, undefined) of
+		undefined -> undefined;
+		RangeBin -> parseRangeValue(RangeBin)
+	end.
+
+parseRangeValue(RangeBin) ->
+	case binary:split(RangeBin, <<"=">>) of
+		[<<"bytes">>, RangePart] ->
+			case binary:split(RangePart, <<"-">>) of
+				[StartBin, EndBin] ->
+					try
+						Start = binary_to_integer(StartBin),
+						End = case EndBin of
+							<<"">> -> undefined;
+							_ -> binary_to_integer(EndBin)
+						end,
+						{Start, End}
+					catch _:_ -> invalid_range
+					end;
+				_ -> invalid_range
+			end;
+		_ -> invalid_range
+	end.
+
+scheduleChunks(Self) ->
+	spawn(fun() ->
+		lists:foreach(
+			fun(I) ->
+				timer:sleep(1000),
+				Self ! {chunk, [<<"chunk-">>, integer_to_binary(I), <<"\n">>]}
+			end,
+			lists:seq(2, 5)
+		),
+		Self ! {chunk, close}
+	end).
+
+%% ======= 工具函数：RFC1123 日期格式 =======
+fmt2(N) -> list_to_binary(io_lib:format("~2..0B", [N])).
+fmt4(N) -> list_to_binary(io_lib:format("~4..0B", [N])).
+
+weekday(1) -> <<"Mon">>;
+weekday(2) -> <<"Tue">>;
+weekday(3) -> <<"Wed">>;
+weekday(4) -> <<"Thu">>;
+weekday(5) -> <<"Fri">>;
+weekday(6) -> <<"Sat">>;
+weekday(7) -> <<"Sun">>.
+
+month(1) -> <<"Jan">>;
+month(2) -> <<"Feb">>;
+month(3) -> <<"Mar">>;
+month(4) -> <<"Apr">>;
+month(5) -> <<"May">>;
+month(6) -> <<"Jun">>;
+month(7) -> <<"Jul">>;
+month(8) -> <<"Aug">>;
+month(9) -> <<"Sep">>;
+month(10) -> <<"Oct">>;
+month(11) -> <<"Nov">>;
+month(12) -> <<"Dec">>.
+
+format_rfc1123({{Y, M, D}, {H, Min, S}}) ->
+	W = calendar:day_of_the_week({Y, M, D}),
+	iolist_to_binary([
+		weekday(W), <<", ">>, fmt2(D), <<" ">>, month(M), <<" ">>, fmt4(Y), <<" ">>,
+		fmt2(H), <<":">>, fmt2(Min), <<":">>, fmt2(S), <<" GMT">>
+	]).
 
 
-handle('GET', [<<"sendfile">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Returning {file, "/path/to/file"} instead of the body results
-   %% in Elli using sendfile.
-   F = "README.md",
-   {ok, [], {file, F}};
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% close(Socket) ->
+% 	wsendFrame(Socket, ?WsOpClose, <<1000, "Normal closure">>).
 
-handle('GET', [<<"send_no_file">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Returning {file, "/path/to/file"} instead of the body results
-   %% in Elli using sendfile.
-   F = "README",
-   {ok, [], {file, F}};
+handleMsg(OpCode, Payload, WebState) ->
+	io:format("IMY***************websocket receive ~p ~ts ~n", [OpCode, Payload]),
+	Ret = doHandleMsg(OpCode, Payload, WebState),
+	io:format("IMY***************websocket return ~p~n", [Ret]),
+	Ret.
 
-handle('GET', [<<"sendfile">>, <<"error">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   F = "test",
-   {ok, [], {file, F}};
+%% @doc 处理WebSocket消息
+doHandleMsg(?WsOpText, Message, WebState) ->
+	%% 记录消息时间
+	Now = erlang:system_time(millisecond),
+	ClientId  =1 ,Count = 1,
+	%% 处理不同类型的消息
+	Response = case binary:split(Message, <<":">>) of
+		[<<"echo">>, EchoMsg] ->
+			iolist_to_binary([<<"Echo: ">>, EchoMsg]);
+		[<<"time">>] ->
+			Timestamp = integer_to_binary(Now),
+			iolist_to_binary([<<"Server time: ">>, Timestamp]);
+		[<<"count">>] ->
+			CountMsg = integer_to_binary(Count + 1),
+			iolist_to_binary([<<"Message count: ">>, CountMsg]);
+		[<<"chat">>, ChatMsg] ->
+			iolist_to_binary([ClientId, <<": ">>, ChatMsg]);
+		_ ->
+			Message
+	end,
+	{ok, ?WsOpText, Response, WebState};
 
-handle('GET', [<<"sendfile">>, <<"range">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Read the Range header of the request and use the normalized
-   %% range with sendfile, otherwise send the entire file when
-   %% no range is present, or respond with a 416 if the range is invalid.
-   F = "README.md",
-   {ok, [], {file, F, get_range(WsReq)}};
+doHandleMsg(?WsOpBinary, Data, WebState) ->
+	%% 处理二进制消息
+	Response = <<"Binary data received, length: ", (integer_to_binary(byte_size(Data)))/binary>>,
+	{ok, ?WsOpBinary, Response, WebState};
 
-handle('GET', [<<"compressed">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Body with a byte size over 1024 are automatically gzipped by
-   %% elli_middleware_compress
-   {ok, binary:copy(<<"Hello World!">>, 86)};
+doHandleMsg(?WsOpClose, _Data, WebState) ->
+	{close, WebState};
 
-handle('GET', [<<"compressed-io_list">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Body with a iolist size over 1024 are automatically gzipped by
-   %% elli_middleware_compress
-   {ok, lists:duplicate(86, [<<"Hello World!">>])};
+%% @doc 处理WebSocket Ping消息
+doHandleMsg(?WsOpPing, _Data, WebState) ->
+	%% 自动回复Pong
+	self() ! {ping, <<"pong">>},
+	{ok, ?WsOpPing, <<"pong">>,  WebState};
 
+doHandleMsg(?WsOpPong, _Data, WebState) ->
+	{ok, WebState};
 
-handle('HEAD', [<<"head">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {200, [], <<"body must be ignored">>};
-
-handle('GET', [<<"chunked">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Start a chunked response for streaming real-time events to the
-   %% browser.
-   %%
-   %% Calling elli_request:send_chunk(ChunkRef, Body) will send that
-   %% part to the client. elli_request:close_chunk(ChunkRef) will
-   %% close the response.
-   %%
-   %% Return immediately {chunk, Headers} to signal we want to chunk.
-   spawn(fun() -> ?MODULE:chunk_loop(not_support) end),
-   {chunk, [{<<"Content-Type">>, <<"text/event-stream">>}]};
-
-handle('GET', [<<"shorthand">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {200, <<"hello">>};
-
-handle('GET', [<<"ip">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {<<"200 OK">>, wsNet:peername(WsReq)};
-
-handle('GET', [<<"304">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% A "Not Modified" response is exactly like a normal response (so
-   %% Content-Length is included), but the body will not be sent.
-   {304, [{<<"Etag">>, <<"foobar">>}], <<"Ignored">>};
-
-handle('GET', [<<"302">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {302, [{<<"Location">>, <<"/hello/world">>}], <<>>};
-
-handle('GET', [<<"403">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   %% Exceptions formatted as return codes can be used to
-   %% short-circuit a response, for example in case of
-   %% authentication/authorization
-   throw({403, [], <<"Forbidden">>});
-
-handle('GET', [<<"invalid_return">>], WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {invalid_return};
-
-handle(_, _, WsReq) ->
-   io:format("receive WsReq: ~p~n", [WsReq]),
-   {404, [], <<"Not Found">>}.
+doHandleMsg(_OpCode, _Data, WebState) ->
+	{ok, WebState}.
 
 
-%% @doc Parse the `Range' header from the request.
-%% The result is either a `byte_range_set()' or the atom `parse_error'.
-%% Use {@link elli_util:normalize_range/2} to get a validated, normalized range.
--spec get_range(elli:wsReq()) -> [http_range()] | parse_error.
-get_range(#wsReq{headers = Headers}) ->
-   case proplists:get_value(<<"range">>, Headers) of
-      <<"bytes=", RangeSetBin/binary>> ->
-         parse_range_set(RangeSetBin);
-      _ -> []
-   end.
+%% @doc 返回支持的WebSocket协议
+-spec supportedProtocols() -> [binary()].
+supportedProtocols() ->
+	%[<<"chat">>, <<"echo">>].
+	 [].
 
-
--spec parse_range_set(Bin :: binary()) -> [http_range()] | parse_error.
-parse_range_set(<<ByteRangeSet/binary>>) ->
-   RangeBins = binary:split(ByteRangeSet, <<",">>, [global]),
-   Parsed = [parse_range(remove_whitespace(RangeBin))
-      || RangeBin <- RangeBins],
-   case lists:member(parse_error, Parsed) of
-      true -> parse_error;
-      false -> Parsed
-   end.
-
--spec remove_whitespace(binary()) -> binary().
-remove_whitespace(Bin) ->
-   binary:replace(Bin, <<" ">>, <<>>, [global]).
-
--type http_range() :: {First :: non_neg_integer(), Last :: non_neg_integer()}
-| {offset, Offset :: non_neg_integer()}
-| {suffix, Length :: pos_integer()}.
-
--spec parse_range(Bin :: binary()) -> http_range() | parse_error.
-parse_range(<<$-, SuffixBin/binary>>) ->
-   %% suffix-byte-range
-   try {suffix, binary_to_integer(SuffixBin)}
-   catch
-      error:badarg -> parse_error
-   end;
-parse_range(<<ByteRange/binary>>) ->
-   case binary:split(ByteRange, <<"-">>) of
-      %% byte-range without last-byte-pos
-      [FirstBytePosBin, <<>>] ->
-         try {offset, binary_to_integer(FirstBytePosBin)}
-         catch
-            error:badarg -> parse_error
-         end;
-      %% full byte-range
-      [FirstBytePosBin, LastBytePosBin] ->
-         try {bytes,
-            binary_to_integer(FirstBytePosBin),
-            binary_to_integer(LastBytePosBin)}
-         catch
-            error:badarg -> parse_error
-         end;
-      _ -> parse_error
-   end.
-
-%% @doc Send 10 separate chunks to the client.
-%% @equiv chunk_loop(Ref, 10)
-chunk_loop(Ref) ->
-   chunk_loop(Ref, 10).
-
-%% @doc If `N > 0', send a chunk to the client, checking for errors,
-%% as the user might have disconnected.
-%% When `N == 0', call {@link elli_request:close_chunk/1.
-%% elli_request:close_chunk(Ref)}.
-chunk_loop(Ref, 0) ->
-   close_chunk(Ref);
-chunk_loop(Ref, N) ->
-   timer:sleep(10),
-
-   case send_chunk(Ref, [<<"chunk">>, integer_to_binary(N)]) of
-      ok -> ok;
-      {error, Reason} -> ?wsErr("error in sending chunk: ~p~n", [Reason])
-   end,
-   chunk_loop(Ref, N - 1).
-
-%% @doc Return a reference that can be used to send chunks to the client.
-%% If the protocol does not support it, return `{error, not_supported}'.
-% chunk_ref(#wsReq{}) ->
-%    {error, not_supported}.
-
-%% @doc Explicitly close the chunked connection.
-%% Return `{error, closed}' if the client already closed the connection.
-%% @equiv send_chunk(Ref, close)
-close_chunk(Ref) ->
-   send_chunk(Ref, close).
-
-% %% @doc Send a chunk asynchronously.
-% async_send_chunk(Ref, Data) ->
-%    Ref ! {chunk, Data}.
-
-%% @doc Send a chunk synchronously.
-%% If the referenced process is dead, return early with `{error, closed}',
-%% instead of timing out.
-send_chunk(Ref, Data) ->
-   ?CASE(is_ref_alive(Ref),
-      send_chunk(Ref, Data, 5000),
-      {error, closed}).
-
-is_ref_alive(Ref) ->
-   ?CASE(node(Ref) =:= node(),
-      is_process_alive(Ref),
-      erpc:call(node(Ref), erlang, is_process_alive, [Ref])).
-
-send_chunk(Ref, Data, Timeout) ->
-   Ref ! {chunk, Data, self()},
-   receive
-      {Ref, ok} ->
-         ok;
-      {Ref, {error, Reason}} ->
-         {error, Reason}
-   after Timeout ->
-      {error, timeout}
-   end.
+%% @doc 返回支持的WebSocket扩展
+-spec supportedExtensions() -> [binary()].
+supportedExtensions() ->
+	[].

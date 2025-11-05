@@ -1,6 +1,3 @@
-%%% @doc Wrapper for plain and SSL sockets.
-%%% Based on `mochiweb_socket.erl'.
-
 -module(wsNet).
 -export([
    send/2

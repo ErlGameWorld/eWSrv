@@ -4,332 +4,453 @@
 -include("wsCom.hrl").
 
 -export([
-   start_link/1
-   , sendResponse/5
-   , sendFile/5
-   %% Exported for looping with a fully-qualified module name
-   , chunkLoop/1
-   , spellHeaders/1
-   , splitArgs/1
-   , closeOrKeepAlive/2
-   , maybeSendContinue/2
+	start_link/1
+	, sendResponse/5
+	, sendFile/5
+	%% Exported for looping with a fully-qualified module name
+	, toBinStr/1
+	, status/1
+	, chunkLoop/1
+	, spellHeaders/1
+	, splitArgs/1
+	, closeOrKeepAlive/2
+	, maybeSendContinue/2
 ]).
 
 %% eNet callback
 -export([newConn/2]).
 
 -export([
-   init_it/2
-   , system_code_change/4
-   , system_continue/3
-   , system_get_state/1
-   , system_terminate/4
+	init_it/2
+	, system_code_change/4
+	, system_continue/3
+	, system_get_state/1
+	, system_terminate/4
 ]).
 
 newConn(_Sock, ConnArgs) ->
-   ?MODULE:start_link(ConnArgs).
+	?MODULE:start_link(ConnArgs).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec(start_link(atom()) -> {ok, pid()} | ignore | {error, term()}).
 start_link(ConnArgs) ->
-   proc_lib:start_link(?MODULE, init_it, [self(), ConnArgs], infinity, []).
+	proc_lib:start_link(?MODULE, init_it, [self(), ConnArgs], infinity, []).
 
 init_it(Parent, Args) ->
-   process_flag(trap_exit, true),
-   modInit(Parent, Args).
+	process_flag(trap_exit, true),
+	modInit(Parent, Args).
 
 -spec system_code_change(term(), module(), undefined | term(), term()) -> {ok, term()}.
 system_code_change(State, _Module, _OldVsn, _Extra) ->
-   {ok, State}.
+	{ok, State}.
 
 -spec system_continue(pid(), [], {module(), atom(), pid(), term()}) -> ok.
 system_continue(_Parent, _Debug, {Parent, State}) ->
-   loop(Parent, State).
+	loop(Parent, State).
 
 -spec system_get_state(term()) -> {ok, term()}.
 system_get_state(State) ->
-   {ok, State}.
+	{ok, State}.
 
 -spec system_terminate(term(), pid(), [], term()) -> none().
 system_terminate(Reason, _Parent, _Debug, State) ->
-   terminate(Reason, State).
+	terminate(Reason, State).
 
 modInit(Parent, Args) ->
-   case init(Args) of
-      {ok, State} ->
-         proc_lib:init_ack(Parent, {ok, self()}),
-         loop(Parent, State);
-      {stop, Reason} ->
-         proc_lib:init_ack(Parent, {error, Reason}),
-         exit(Reason)
-   end.
+	case init(Args) of
+		{ok, State} ->
+			proc_lib:init_ack(Parent, {ok, self()}),
+			loop(Parent, State);
+		{stop, Reason} ->
+			proc_lib:init_ack(Parent, {error, Reason}),
+			exit(Reason)
+	end.
 
 loop(Parent, State) ->
-   receive
-      {system, From, Request} ->
-         sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {Parent, State});
-      {'EXIT', Parent, Reason} ->
-         terminate(Reason, State);
-      Msg ->
-         case handleMsg(Msg, State) of
-            kpS ->
-               loop(Parent, State);
-            {ok, NewState} ->
-               loop(Parent, NewState);
-            {stop, Reason} ->
-               terminate(Reason, State)
-         end
-   end.
+	receive
+		{system, From, Request} ->
+			sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {Parent, State});
+		{'EXIT', Parent, Reason} ->
+			terminate(Reason, State);
+		Msg ->
+			case handleMsg(Msg, State) of
+				kpS ->
+					loop(Parent, State);
+				{ok, NewState} ->
+					loop(Parent, NewState);
+				{stop, Reason} ->
+					terminate(Reason, State)
+			end
+	end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ************************************************  API ***************************************************************
 
 init({WsMod, MaxSize, ChunkedSupp}) ->
-   {ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp}}.
+	{ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp}}.
 
 handleMsg({tcp, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
-      {ok, _NewState} = LRet ->
-         LRet;
-      {done, NewState} ->
-         Response = doHandle(NewState),
-         #wsState{buffer = Buffer, socket = Socket, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
-            keep_alive ->
-               case Buffer of
-                  <<>> ->
-                     {ok, newWsState(NewState)};
-                  _ ->
-                     handleMsg({tcp, Socket, Buffer}, newWsState(NewState))
-               end;
-            close ->
-               {stop, normal}
-         end;
-      Err ->
-         ?wsErr("recv the http data error ~p~n", [Err]),
-         sendBadRequest(Socket),
-         {stop, Err}
-   end;
+	#wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
+	case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+		{wsDone, NewState} ->
+			Response = doHandle(NewState),
+			#wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method} = NewState,
+			case doResponse(Response, Socket, TemHeader, Method) of
+				keep_alive ->
+					case NBuffer of
+						<<>> ->
+							{ok, newWsState(NewState)};
+						_ ->
+							handleMsg({tcp, Socket, NBuffer}, newWsState(NewState))
+					end;
+				keep_ws ->
+					%% Switch to WebSocket stage and notify handler
+					#wsState{wsReq = WsReq, wsMod = WsMod} = NewState,
+					%% 添加WebSocket扩展支持（如果模块支持）
+					WedState = case erlang:function_exported(WsMod, onWsUpgrade, 1) of
+						true ->
+							WsMod:onWsUpgrade(WsReq);
+						_ ->
+							undefined
+					end,
+					TemWsState = newWsState(NewState),
+					NewWsState = TemWsState#wsState{webState = WedState, stage = wsWs},
+					case NBuffer of
+						<<>> -> {ok, NewWsState};
+						_ ->
+							handleMsg({tcp, Socket, NBuffer}, NewWsState)
+					end;
+				close ->
+					{stop, normal}
+			end;
+		{ok, _NewState} = LRet ->
+			LRet;
+		{close, _NewState} ->
+			{stop, normal};
+		Err ->
+			case Err of
+				{err_code, Code} ->
+					sendRescueResponse(Socket, Code, <<>>),
+					{stop, Err};
+				_ ->
+					?wsErr("recv the http data error ~p~n", [Err]),
+					Stage /= wsWs andalso sendBadRequest(Socket),
+					{stop, Err}
+			end
+	end;
 handleMsg({tcp_closed, _Socket}, _State) ->
-   {stop, normal};
+	{stop, normal};
 handleMsg({tcp_error, _Socket, Reason}, _State) ->
-   ?wsErr("the http tcp socket error ~p~n", [Reason]),
-   {stop, tcp_error};
+	?wsErr("the http tcp socket error ~p~n", [Reason]),
+	{stop, tcp_error};
+handleMsg({tcp_passive, Socket}, _State) ->
+	wsNet:setopts(Socket, [{active, ?ActionN}]),
+	kpS;
 
 handleMsg({ssl, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
-      {ok, _NewState} = LRet ->
-         LRet;
-      {done, NewState} ->
-         Response = doHandle(NewState),
-         #wsState{buffer = Buffer, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
-            keep_alive ->
-               case Buffer of
-                  <<>> ->
-                     {ok, newWsState(NewState)};
-                  _ ->
-                     handleMsg({ssl, Socket, Buffer}, newWsState(NewState))
-               end;
-            close ->
-               {stop, normal}
-         end;
-      Err ->
-         ?wsErr("recv the http data error ~p~n", [Err]),
-         sendBadRequest(Socket),
-         {stop, Err}
-   end;
+	#wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
+	case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+		{wsDone, NewState} ->
+			Response = doHandle(NewState),
+			#wsState{buffer = NBuffer, temHeader = TemHeader, method = Method} = NewState,
+			case doResponse(Response, Socket, TemHeader, Method) of
+				keep_alive ->
+					case NBuffer of
+						<<>> ->
+							{ok, newWsState(NewState)};
+						_ ->
+							handleMsg({ssl, Socket, NBuffer}, newWsState(NewState))
+					end;
+				keep_ws ->
+					%% Switch to WebSocket stage and notify handler
+					#wsState{wsReq = WsReq, wsMod = WsMod} = NewState,
+					%% 添加WebSocket扩展支持（如果模块支持）
+					WedState = case erlang:function_exported(WsMod, onWsUpgrade, 1) of
+						true ->
+							WsMod:onWsUpgrade(WsReq);
+						_ ->
+							undefined
+					end,
+					TemWsState = newWsState(NewState),
+					NewWsState = TemWsState#wsState{webState = WedState, stage = wsWs},
+					case NBuffer of
+						<<>> -> {ok, NewWsState};
+						_ ->
+							handleMsg({tcp, Socket, NBuffer}, NewWsState)
+					end;
+				close ->
+					{stop, normal}
+			end;
+		{ok, _NewState} = LRet ->
+			LRet;
+		{close, _NewState} ->
+			{stop, normal};
+		Err ->
+			case Err of
+				{err_code, Code} ->
+					sendRescueResponse(Socket, Code, <<>>),
+					{stop, Err};
+				_ ->
+					?wsErr("recv the http data error ~p~n", [Err]),
+					Stage /= wsWs andalso sendBadRequest(Socket),
+					{stop, Err}
+			end
+	end;
 handleMsg({ssl_closed, _Socket}, _State) ->
-   {stop, normal};
+	{stop, normal};
+handleMsg({ssl_passive, Socket}, _State) ->
+	wsNet:setopts(Socket, [{active, ?ActionN}]),
+	kpS;
 handleMsg({ssl_error, _Socket, Reason}, _State) ->
-   ?wsErr("the http ssl socket error ~p~n", [Reason]),
-   {stop, ssl_error};
-handleMsg({?mSockReady, Sock}, State) ->
-   inet:setopts(Sock, [{packet, raw}, {active, true}]),
-   {ok, State#wsState{socket = Sock}};
-handleMsg({?mSockReady, Sock, SslOpts, SslHSTet}, State) ->
-   case ntSslAcceptor:handshake(Sock, SslOpts, SslHSTet) of
-      {ok, SslSock} ->
-         ssl:setopts(Sock, [{packet, raw}, {active, true}]),
-         {ok, State#wsState{socket = SslSock, isSsl = true}};
-      _Err ->
-         ?wsErr("ssl handshake error ~p~n", [_Err]),
-         {stop, handshake_error}
-   end;
+	?wsErr("the http ssl socket error ~p~n", [Reason]),
+	{stop, ssl_error};
+handleMsg({?mSockReady, Socket}, State) ->
+	inet:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
+	{ok, State#wsState{socket = Socket}};
+handleMsg({?mSockReady, Socket, SslOpts, SslHSTet}, State) ->
+	case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
+		{ok, SslSock} ->
+			ssl:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
+			{ok, State#wsState{socket = SslSock, isSsl = true}};
+		_Err ->
+			?wsErr("ssl handshake error ~p~n", [_Err]),
+			{stop, handshake_error}
+	end;
 handleMsg(_Msg, _State) ->
-   ?wsErr("~p info receive unexpect msg ~p ~n ", [?MODULE, _Msg]),
-   kpS.
+	?wsErr("~p info receive unexpect msg ~p ~n ", [?MODULE, _Msg]),
+	kpS.
 
 terminate(Reason, #wsState{socket = Socket} = _State) ->
-   wsNet:close(Socket),
-   exit(Reason).
+	wsNet:close(Socket),
+	exit(Reason).
 
 newWsState(WsState) ->
-   WsState#wsState{
-      stage = reqLine
-      , buffer = <<>>
-      , wsReq = undefined
-      , headerCnt = 0
-      , temHeader = []
-      , contentLength = undefined
-      , temChunked = <<>>
-   }.
+	WsState#wsState{
+		stage = reqLine
+		, buffer = <<>>
+		, wsReq = undefined
+		, headerCnt = 0
+		, temHeader = []
+		, contentLength = undefined
+		, temChunked = <<>>
+	}.
 
 %% @doc Execute the user callback, translating failure into a proper response.
 doHandle(State) ->
-   #wsState{wsMod = WsMod, method = Method, path = Path, wsReq = WsReq} = State,
-   try WsMod:handle(Method, Path, WsReq) of
-      %% {ok,...{file,...}}
-      {ok, Headers, {file, Filename}} ->
-         {file, 200, Headers, Filename, []};
-      {ok, Headers, {file, Filename, Range}} ->
-         {file, 200, Headers, Filename, Range};
-      %% ok simple
-      {ok, Headers, Body} -> {response, 200, Headers, Body};
-      {ok, Body} -> {response, 200, [], Body};
-      %% Chunk
-      {chunk, Headers} -> {chunk, Headers, <<"">>};
-      {chunk, Headers, Initial} -> {chunk, Headers, Initial};
-      %% File
-      {HttpCode, Headers, {file, Filename}} ->
-         {file, HttpCode, Headers, Filename, {0, 0}};
-      {HttpCode, Headers, {file, Filename, Range}} ->
-         {file, HttpCode, Headers, Filename, Range};
-      %% Simple
-      {HttpCode, Headers, Body} -> {response, HttpCode, Headers, Body};
-      {HttpCode, Body} -> {response, HttpCode, [], Body};
-      %% Unexpected
-      Unexpected ->
-         ?wsErr("handle return error WsReq:~p Ret:~p~n", [WsReq, Unexpected]),
-         {response, 500, [], <<"Internal server error">>}
-   catch
-      throw:{ResponseCode, Headers, Body} when is_integer(ResponseCode) ->
-         {response, ResponseCode, Headers, Body};
-      throw:Exc:Stacktrace ->
-         ?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>};
-      error:Error:Stacktrace ->
-         ?wsErr("handle catch error WsReq:~p R:~p S:~p~n", [WsReq, Error, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>};
-      exit:Exit:Stacktrace ->
-         ?wsErr("handle catch exit WsReq:~p R:~p S:~p~n", [WsReq, Exit, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>}
-   end.
+	#wsState{wsMod = WsMod, method = Method, path = Path, wsReq = WsReq} = State,
+	try WsMod:handle(Method, Path, WsReq) of
+		%% {ok,...{file,...}}
+		{ok, Headers, {file, Filename}} ->
+			{file, 200, Headers, Filename, []};
+		{ok, Headers, {file, Filename, Range}} ->
+			{file, 200, Headers, Filename, Range};
+		%% ok simple
+		{ok, Headers, Body} -> {response, 200, Headers, Body};
+		{ok, Body} -> {response, 200, [], Body};
+		%% Chunk
+		{chunk, Headers} -> {chunk, Headers, <<"">>};
+		{chunk, Headers, Initial} -> {chunk, Headers, Initial};
+		%% WebSocket升级
+		{wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, Headers);
+		%% File
+		{HttpCode, Headers, {file, Filename}} ->
+			{file, HttpCode, Headers, Filename, {0, 0}};
+		{HttpCode, Headers, {file, Filename, Range}} ->
+			{file, HttpCode, Headers, Filename, Range};
+		%% Simple
+		{HttpCode, Headers, Body} -> {response, HttpCode, Headers, Body};
+		{HttpCode, Body} -> {response, HttpCode, [], Body};
+		%% Unexpected
+		Unexpected ->
+			?wsErr("handle return error WsReq:~p Ret:~p~n", [WsReq, Unexpected]),
+			{response, 500, [], <<"Internal server error">>}
+	catch
+		throw:{ResponseCode, Headers, Body} when is_integer(ResponseCode) ->
+			{response, ResponseCode, Headers, Body};
+		throw:Exc:Stacktrace ->
+			?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
+			{response, 500, [], <<"Internal server error">>};
+		error:Error:Stacktrace ->
+			?wsErr("handle catch error WsReq:~p R:~p S:~p~n", [WsReq, Error, Stacktrace]),
+			{response, 500, [], <<"Internal server error">>};
+		exit:Exit:Stacktrace ->
+			?wsErr("handle catch exit WsReq:~p R:~p S:~p~n", [WsReq, Exit, Stacktrace]),
+			{response, 500, [], <<"Internal server error">>}
+	end.
 
+%% Inject compression for normal responses
 doResponse({response, Code, UserHeaders, Body}, Socket, TemHeader, Method) ->
-   Headers = [connection(UserHeaders, TemHeader), contentLength(UserHeaders, Body) | UserHeaders],
-   sendResponse(Socket, Method, Code, Headers, Body),
-   closeOrKeepAlive(UserHeaders, TemHeader);
+	{SBody, NUserHeaders} = tryCompressResponse(Body, UserHeaders, TemHeader, Code, Method),
+	%% Recalculate Content-Length after potential compression
+	NHeaders = lists:keystore(<<"Content-Length">>, 1, NUserHeaders, {<<"Content-Length">>, iolist_size(SBody)}),
+	Headers = [connection(NHeaders, TemHeader) | NHeaders],
+	sendResponse(Socket, Method, Code, Headers, SBody),
+	closeOrKeepAlive(NUserHeaders, TemHeader);
 doResponse({chunk, UserHeaders, Initial}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [transferEncoding(UserHeaders), connection(UserHeaders, TemHeader) | UserHeaders],
-   sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
-   Initial =:= <<"">> orelse sendChunk(Socket, Initial),
-   case startChunkLoop(Socket) of
-      {error, client_closed} -> client;
-      ok -> server
-   end,
-   close;
+	ResponseHeaders = [transferEncoding(UserHeaders), connection(UserHeaders, TemHeader) | UserHeaders],
+	sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
+	Initial =:= <<"">> orelse sendChunk(Socket, Initial),
+	case startChunkLoop(Socket) of
+		{error, client_closed} -> client;
+		ok -> server
+	end,
+	closeOrKeepAlive(UserHeaders, TemHeader);
+%% WebSocket升级响应
+doResponse({wsWebSocket, UserHeaders}, Socket, _TemHeader, _Method) ->
+	sendResponse(Socket, 'GET', 101, UserHeaders, <<>>),
+	keep_ws;
 doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [connection(UserHeaders, TemHeader) | UserHeaders],
-   case wsUtil:fileSize(Filename) of
-      {error, _FileError} ->
-         sendSrvError(Socket),
-         {stop, file_error};
-      Size ->
-         Ret =
-            case wsUtil:normalizeRange(Range, Size) of
-               undefined ->
-                  sendFile(Socket, ResponseCode, [{?CONTENT_LENGTH_HEADER, Size} | ResponseHeaders], Filename, {0, 0});
-               {Offset, Length} ->
-                  ERange = wsUtil:encodeRange({Offset, Length}, Size),
-                  sendFile(Socket, 206, lists:append(ResponseHeaders, [{?CONTENT_LENGTH_HEADER, Length}, {<<"Content-Range">>, ERange}]), Filename, {Offset, Length});
-               invalid_range ->
-                  ERange = wsUtil:encodeRange(invalid_range, Size),
-                  sendResponse(Socket, Method, 416, lists:append(ResponseHeaders, [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange}]), <<>>),
-                  {error, range}
-            end,
-         case Ret of
-            ok ->
-               closeOrKeepAlive(UserHeaders, TemHeader);
-            _Err ->
-               {stop, Ret}
-         end
-   end.
+	ResponseHeaders = [connection(UserHeaders, TemHeader) | UserHeaders],
+	case wsUtil:fileSize(Filename) of
+		{error, _FileError} ->
+			sendSrvError(Socket),
+			{stop, file_error};
+		Size ->
+			Ret =
+				case wsUtil:normalizeRange(Range, Size) of
+					undefined ->
+						sendFile(Socket, ResponseCode, [{<<"Content-Length">>, Size} | ResponseHeaders], Filename, {0, 0});
+					{Offset, Length} ->
+						ERange = wsUtil:encodeRange({Offset, Length}, Size),
+						sendFile(Socket, 206, lists:append(ResponseHeaders, [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange}]), Filename, {Offset, Length});
+					invalid_range ->
+						ERange = wsUtil:encodeRange(invalid_range, Size),
+						sendResponse(Socket, Method, 416, lists:append(ResponseHeaders, [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange}]), <<>>),
+						{error, range}
+				end,
+			case Ret of
+				ok ->
+					closeOrKeepAlive(UserHeaders, TemHeader);
+				_Err ->
+					{stop, Ret}
+			end
+	end.
 
 %% @doc Generate a HTTP response and send it to the client.
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
-   Body =
-      case Method of
-         'HEAD' ->
-            <<>>;
-         _ ->
-            case Code of
-               304 ->
-                  <<>>;
-               204 ->
-                  <<>>;
-               _ ->
-                  UserBody
-            end
-      end,
+	Body =
+		case Method of
+			'HEAD' ->
+				<<>>;
+			_ ->
+				case Code of
+					304 ->
+						<<>>;
+					204 ->
+						<<>>;
+					_ ->
+						UserBody
+				end
+		end,
 
-   Response = httpResponse(Code, Headers, Body),
+	Response = httpResponse(Code, Headers, Body),
+	case wsNet:send(Socket, Response) of
+		ok ->
+			ok;
+		_Err ->
+			?wsErr("send_response error ~p~n", [_Err])
+	end.
 
-   case wsNet:send(Socket, Response) of
-      ok ->
-         ok;
-      _Err ->
-         ?wsErr("send_response error ~p~n", [_Err])
-   end.
+%% helpers for compression
+tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
+	%% skip when no body should be sent
+	Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 304),
+	case Skip orelse iolist_size(Body) =:= 0 of
+		true -> {Body, UserHeaders};
+		false ->
+			case lists:keyfind(<<"Content-Encoding">>, 1, UserHeaders) of
+				false ->
+					case chooseContentEncoding(ReqHeaders) of
+						none ->
+							{Body, UserHeaders};
+						gzip ->
+							CBody = zlib:gzip(iolist_to_binary(Body)),
+							{CBody, addVary([{<<"Content-Encoding">>, <<"gzip">>} | UserHeaders])};
+						deflate ->
+							CBody = zlib:compress(iolist_to_binary(Body)),
+							{CBody, addVary([{<<"Content-Encoding">>, <<"deflate">>} | UserHeaders])}
+					end;
+				_ ->
+					{Body, UserHeaders}
+			end
+	end.
+
+chooseContentEncoding(ReqHeaders) ->
+	case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
+		false ->
+			none;
+		{_, V} ->
+			Lower = lowerBin(V),
+			case binary:match(Lower, <<"gzip">>) of
+				nomatch ->
+					case binary:match(Lower, <<"deflate">>) of
+						nomatch ->
+							none;
+						_ ->
+							deflate
+					end;
+				_ ->
+					gzip
+			end
+	end.
+
+lowerBin(Bin) when is_binary(Bin) ->
+	string:lowercase(Bin);
+lowerBin(L) when is_list(L) ->
+	list_to_binary(string:lowercase(L)).
+
+addVary(Hs) ->
+	case lists:keyfind(<<"Vary">>, 1, Hs) of
+		false -> [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
+		_ -> Hs
+	end.
 
 %% @doc Send a HTTP response to the client where the body is the
 %% contents of the given file. Assumes correctly set response code
 %% and headers.
 -spec sendFile(Req, Code, Headers, Filename, Range) -> ok when
-   Req :: elli:wsReq(),
-   Code :: elli:wsHttpCode(),
-   Headers :: elli:wsHeaders(),
-   Filename :: file:filename(),
-   Range :: wsUtil:range().
+	Req :: wsReq(),
+	Code :: wsHttpCode(),
+	Headers :: wsHeaders(),
+	Filename :: file:filename(),
+	Range :: wsUtil:range().
 sendFile(Socket, Code, Headers, Filename, Range) ->
-   ResponseHeaders = httpResponse(Code, Headers, <<>>),
-   case file:open(Filename, [read, raw, binary]) of
-      {ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
-      {error, _FileError} = Err ->
-         sendSrvError(Socket),
-         Err
-   end.
+	ResponseHeaders = httpResponse(Code, Headers, <<>>),
+	case file:open(Filename, [read, raw, binary]) of
+		{ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
+		{error, _FileError} = Err ->
+			sendSrvError(Socket),
+			Err
+	end.
 
 doSendFile(Fd, {Offset, Length}, Socket, Headers) ->
-   try wsNet:send(Socket, Headers) of
-      ok ->
-         case wsNet:sendfile(Fd, Socket, Offset, Length, []) of
-            {ok, _BytesSent} -> ok;
-            {error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
-               ?wsErr("send file error"),
-               LErr
-         end;
-      {error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
-         ?wsErr("send file error"),
-         LErr
-   after
-      file:close(Fd)
-   end.
+	try wsNet:send(Socket, Headers) of
+		ok ->
+			case wsNet:sendfile(Fd, Socket, Offset, Length, []) of
+				{ok, _BytesSent} -> ok;
+				{error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
+					?wsErr("send file error"),
+					LErr
+			end;
+		{error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
+			?wsErr("send file error"),
+			LErr
+	after
+		file:close(Fd)
+	end.
 
 %% @doc To send a response, we must first have received everything the
 %% client is sending. If this is not the case, {@link send_bad_request/1}
 %% might reset the client connection.
 sendBadRequest(Socket) ->
-   sendRescueResponse(Socket, 400, <<"Bad Request">>).
+	sendRescueResponse(Socket, 400, <<"Bad Request">>).
 
 sendSrvError(Socket) ->
-   sendRescueResponse(Socket, 500, <<"Server Error">>).
+	sendRescueResponse(Socket, 500, <<"Server Error">>).
 
 sendRescueResponse(Socket, Code, Body) ->
-   Response = httpResponse(Code, Body),
-   wsNet:send(Socket, Response).
+	Response = httpResponse(Code, Body),
+	wsNet:send(Socket, Response).
 
 %% CHUNKED-TRANSFER
 %% @doc The chunk loop is an intermediary between the socket and the
@@ -337,84 +458,84 @@ sendRescueResponse(Socket, Code, Body) ->
 %% empty response, which signals that the connection should be
 %% closed. When the client closes the socket, the loop exits.
 startChunkLoop(Socket) ->
-   %% Set the socket to active so we receive the tcp_closed message
-   %% if the client closes the connection
-   wsNet:setopts(Socket, [{active, once}]),
-   ?MODULE:chunkLoop(Socket).
+	%% Set the socket to active so we receive the tcp_closed message
+	%% if the client closes the connection
+	wsNet:setopts(Socket, [{active, ?ActionN}]),
+	?MODULE:chunkLoop(Socket).
 
 chunkLoop(Socket) ->
-   receive
-      {tcp_closed, Socket} ->
-         {error, client_closed};
-      {chunk, close} ->
-         case wsNet:send(Socket, <<"0\r\n\r\n">>) of
-            ok ->
-               ok;
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
-               {error, client_closed}
-         end;
-      {chunk, close, From} ->
-         case wsNet:send(Socket, <<"0\r\n\r\n">>) of
-            ok ->
-               From ! {self(), ok},
-               ok;
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
-               From ! {self(), {error, closed}},
-               ok
-         end;
-      {chunk, Data} ->
-         sendChunk(Socket, Data),
-         ?MODULE:chunkLoop(Socket);
-      {chunk, Data, From} ->
-         case sendChunk(Socket, Data) of
-            ok ->
-               From ! {self(), ok};
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
-               From ! {self(), {error, closed}}
-         end,
-         ?MODULE:chunkLoop(Socket)
-   after 10000 ->
-      ?MODULE:chunkLoop(Socket)
-   end.
+	receive
+		{tcp_closed, Socket} ->
+			{error, client_closed};
+		{chunk, close} ->
+			case wsNet:send(Socket, <<"0\r\n\r\n">>) of
+				ok ->
+					ok;
+				{error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
+					{error, client_closed}
+			end;
+		{chunk, close, From} ->
+			case wsNet:send(Socket, <<"0\r\n\r\n">>) of
+				ok ->
+					From ! {self(), ok},
+					ok;
+				{error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
+					From ! {self(), {error, closed}},
+					ok
+			end;
+		{chunk, Data} ->
+			sendChunk(Socket, Data),
+			?MODULE:chunkLoop(Socket);
+		{chunk, Data, From} ->
+			case sendChunk(Socket, Data) of
+				ok ->
+					From ! {self(), ok};
+				{error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
+					From ! {self(), {error, closed}}
+			end,
+			?MODULE:chunkLoop(Socket)
+	after 10000 ->
+		?MODULE:chunkLoop(Socket)
+	end.
 
 sendChunk(Socket, Data) ->
-   case iolist_size(Data) of
-      0 -> ok;
-      Size ->
-         Response = [integer_to_binary(Size, 16), <<"\r\n">>, Data, <<"\r\n">>],
-         wsNet:send(Socket, Response)
-   end.
+	case iolist_size(Data) of
+		0 -> ok;
+		Size ->
+			Response = [integer_to_binary(Size, 16), <<"\r\n">>, Data, <<"\r\n">>],
+			wsNet:send(Socket, Response)
+	end.
 
 maybeSendContinue(Socket, Headers) ->
-   % According to RFC2616 section 8.2.3 an origin server must respond with
-   % either a "100 Continue" or a final response code when the client
-   % headers contains "Expect:100-continue"
-   case lists:keyfind(?EXPECT_HEADER, 1, Headers) of
-      <<"100-continue">> ->
-         Response = httpResponse(100),
-         wsNet:send(Socket, Response);
-      _Other ->
-         ok
-   end.
+	% According to RFC2616 section 8.2.3 an origin server must respond with
+	% either a "100 Continue" or a final response code when the client
+	% headers contains "Expect:100-continue"
+	case lists:keyfind(<<"Expect">>, 1, Headers) of
+		<<"100-continue">> ->
+			Response = httpResponse(100),
+			wsNet:send(Socket, Response);
+		_Other ->
+			ok
+	end.
 
 httpResponse(Code) ->
-   httpResponse(Code, <<>>).
+	httpResponse(Code, <<>>).
 
 httpResponse(Code, Body) ->
-   httpResponse(Code, [{?CONTENT_LENGTH_HEADER, size(Body)}], Body).
+	httpResponse(Code, [{<<"Content-Length">>, size(Body)}], Body).
 
 httpResponse(Code, Headers, Body) ->
-   [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
+	[<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
 
 spellHeaders(Headers) ->
-   <<<<(toBinStr(Key))/binary, ": ", (toBinStr(Value))/binary, "\r\n">> || {Key, Value} <- Headers>>.
+	<<<<Key/binary, ": ", (toBinStr(Value))/binary, "\r\n">> || {Key, Value} <- Headers>>.
 
 -spec splitArgs(binary()) -> list({binary(), binary() | true}).
 splitArgs(<<>>) -> [];
 splitArgs(Qs) ->
-   Tokens = binary:split(Qs, <<"&">>, [global, trim]),
-   [case binary:split(Token, <<"=">>) of [Token] -> {Token, true}; [Name, Value] ->
-      {Name, Value} end || Token <- Tokens].
+	Tokens = binary:split(Qs, <<"&">>, [global, trim]),
+	[case binary:split(Token, <<"=">>) of [Token] -> {Token, true}; [Name, Value] ->
+		{Name, Value} end || Token <- Tokens].
 
 toBinStr(V) when is_integer(V) -> integer_to_binary(V);
 toBinStr(V) when is_binary(V) -> V;
@@ -422,50 +543,42 @@ toBinStr(V) when is_list(V) -> list_to_binary(V);
 toBinStr(V) when is_atom(V) -> atom_to_binary(V).
 
 closeOrKeepAlive(UserHeaders, ReqHeader) ->
-   case lists:keyfind(?CONNECTION_HEADER, 1, UserHeaders) of
-      {_, <<"Close">>} ->
-         close;
-      {_, <<"close">>} ->
-         close;
-      _ ->
-         case lists:keyfind(?CONNECTION_HEADER, 1, ReqHeader) of
-            {_, <<"Close">>} ->
-               close;
-            {_, <<"close">>} ->
-               close;
-            _ ->
-               keep_alive
-         end
-   end.
+	case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
+		{_, <<"Close">>} ->
+			close;
+		{_, <<"close">>} ->
+			close;
+		_ ->
+			case lists:keyfind('Connection', 1, ReqHeader) of
+				{_, <<"Close">>} ->
+					close;
+				{_, <<"close">>} ->
+					close;
+				_ ->
+					keep_alive
+			end
+	end.
 
 connection(UserHeaders, ReqHeader) ->
-   case lists:keyfind(?CONNECTION_HEADER, 1, UserHeaders) of
-      false ->
-         case lists:keyfind(?CONNECTION_HEADER, 1, ReqHeader) of
-            false ->
-               {?CONNECTION_HEADER, <<"Keep-Alive">>};
-            Tuple ->
-               Tuple
-         end;
-      _ ->
-         []
-   end.
-
-contentLength(Headers, Body) ->
-   case lists:keyfind(?CONTENT_LENGTH_HEADER, 1, Headers) of
-      false ->
-         {?CONTENT_LENGTH_HEADER, iolist_size(Body)};
-      _ ->
-         []
-   end.
+	case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
+		false ->
+			case lists:keyfind('Connection', 1, ReqHeader) of
+				false ->
+					{<<"Connection">>, <<"Keep-Alive">>};
+				{_HKey, HValue} ->
+					{<<"Connection">>, HValue}
+			end;
+		_ ->
+			[]
+	end.
 
 transferEncoding(Headers) ->
-   case lists:keyfind(?TRANSFER_ENCODING_HEADER, 1, Headers) of
-      false ->
-         {?TRANSFER_ENCODING_HEADER, <<"chunked">>};
-      _ ->
-         []
-   end.
+	case lists:keyfind(<<"Transfer-Encoding">>, 1, Headers) of
+		false ->
+			{<<"Transfer-Encoding">>, <<"chunked">>};
+		_ ->
+			[]
+	end.
 
 %% HTTP STATUS CODES
 status(100) -> <<"100 Continue">>;

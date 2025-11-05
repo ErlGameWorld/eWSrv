@@ -31,22 +31,29 @@
    , wsVersion/0
    , header_key/0
    , wsSocket/0
+	, wsOpCode/0
 ]).
 
 -type wsReq() :: #wsReq{}.
 -type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST'| 'PUT' | 'DELETE' | 'TRACE' | binary().
 -type wsBody() :: binary() | iolist().
 -type wsPath() :: binary().
--type wsHeader() :: {Key :: binary(), Value :: binary() | string()}.
+-type wsHeader() :: {Key :: atom(), Value :: binary() | string()}.
 -type wsHeaders() :: [wsHeader()].
 -type wsHttpCode() :: 100..999.
 -type wsVersion() :: {0, 9} | {1, 0} | {1, 1}.
 -type wsSocket() :: inet:socket() | ssl:sslsocket().
 
--define(CONTENT_LENGTH_HEADER, 'Content-Length').
--define(CONNECTION_HEADER, 'Connection').
--define(TRANSFER_ENCODING_HEADER, 'Transfer-Encoding').
--define(EXPECT_HEADER, <<"Expect">>).
+
+%% WebSocket帧类型
+-define(WsOpCF, 16#0).															  %% 表示一个继续帧（Continuation Frame）
+-define(WsOpText, 16#1).
+-define(WsOpBinary, 16#2).
+-define(WsOpClose, 16#8).
+-define(WsOpPing, 16#9).
+-define(WsOpPong, 16#A).
+
+-type wsOpCode() :: ?WsOpCF | ?WsOpText | ?WsOpBinary | ?WsOpClose | ?WsOpPing | ?WsOpPong.
 
 %% http header 头
  -type header_key() ::

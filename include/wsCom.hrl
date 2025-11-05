@@ -11,13 +11,15 @@
    , {packet, raw}
    , {active, false}
    , {reuseaddr, true}
-   , {nodelay, false}
-   , {delay_send, true}
+   , {nodelay, true}
+   , {delay_send, false}
    , {send_timeout, 15000}
    , {keepalive, true}
    , {exit_on_close, true}
    , {backlog, 4096}
 ]).
+
+-define(ActionN, 128).
 
 -define(CASE(Cond, Then, That), case Cond of true -> Then; _ -> That end).
 
@@ -27,7 +29,7 @@
 
 -type sendfile_opts() :: [{chunk_size, non_neg_integer()}].
 
--type stage() :: reqLine | wsHeader | wsBody | done.                    %% 接受http请求可能会有多个包 分四个阶接收
+-type stage() :: reqLine | wsHeader | wsBody | wsDone | wsWs.       %% 接受http请求可能会有多个包 分四个阶接收
 -record(wsState, {
    stage = reqLine :: stage()                                       %% 接收数据阶段
    , buffer = <<>> :: binary()                                      %% 缓存接收到的数据
@@ -44,4 +46,13 @@
    , wsMod :: module()                                              %% 回调请求的模块
    , maxSize = infinity :: pos_integer()                            %% 单次允许接收的最大长度
    , chunkedSupp = false :: boolean()                               %% 是否运行 chunked
+
+	, fragmented = false :: boolean()     									  %% websocket
+	, fragmentedOpcode :: integer()											  %% websocket 操作码
+	, fragmentedBuffer = <<>> :: binary()                            %% websocket 中间缓存数据
+	, webState :: term()															  %% websocket链接状态数据
 }).
+
+%% WebSocket握手常量
+-define(WS_GUID, <<"258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>).
+-define(WS_VERSION, <<"13">>).

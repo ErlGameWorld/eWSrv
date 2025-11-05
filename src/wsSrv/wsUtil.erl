@@ -6,11 +6,13 @@
 
 -export([
    gLV/3
+	, getHeader/3
    , mergeOpts/2
    , normalizeRange/2
    , encodeRange/2
    , fileSize/1
    , sendfile/5
+	, toLowerStr/1
 ]).
 
 -export_type([range/0]).
@@ -23,6 +25,35 @@ gLV(Key, List, Default) ->
       {Key, Value} ->
          Value
    end.
+
+getHeader(HeaderName, Headers, Default) ->
+	case lists:keyfind(HeaderName, 1, Headers) of
+		{HeaderName, Value} -> Value;
+		false -> Default
+	end.
+
+toLowerStr(BinStr) when is_binary(BinStr) ->
+	<<
+		begin
+			case C >= $A andalso C =< $Z of
+				true ->
+					<<(C + 32)>>;
+				_ ->
+					<<C>>
+			end
+		end || <<C:8>> <= BinStr
+	>>;
+toLowerStr(ListStr) when is_list(ListStr) ->
+	[
+		begin
+			case C >= $A andalso C =< $Z of
+				true ->
+					C + 32;
+				_ ->
+					C
+			end
+		end || C <- ListStr
+	].
 
 -spec mergeOpts(Defaults :: list(), Options :: list()) -> list().
 mergeOpts(Defaults, Options) ->
