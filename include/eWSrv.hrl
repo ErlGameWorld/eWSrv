@@ -2,10 +2,11 @@
 
 -export_type([wsOpt/0]).
 -type wsOpt() ::
-   listenOpt() |                 %% eNet相关配置
-   {wsMod, module()} |           %% 请求处理的回调模块
-   {maxSize, infinity | pos_integer()} |    %% 单次请求Content-Length的最大值 默认值 infinity
-   {chunkedSupp, boolean()}.                %% 服务器是否运行客户端发送Transfer-Encoding 默认不运行 主要是为了防攻击
+listenOpt() |                 %% eNet相关配置
+{wsMod, module()} |           %% 请求处理的回调模块
+{wsSupName, pid() | term()} |            %% ws服务器的supervisor名称
+{maxSize, infinity | pos_integer()} |    %% 单次请求Content-Length的最大值 默认值 infinity
+{chunkedSupp, boolean()}.                %% 服务器是否运行客户端发送Transfer-Encoding 默认不运行 主要是为了防攻击
 
 
 -record(wsReq, {
@@ -31,7 +32,7 @@
    , wsVersion/0
    , header_key/0
    , wsSocket/0
-	, wsOpCode/0
+   , wsOpCode/0
 ]).
 
 -type wsReq() :: #wsReq{}.
@@ -46,7 +47,7 @@
 
 
 %% WebSocket帧类型
--define(WsOpCF, 16#0).															  %% 表示一个继续帧（Continuation Frame）
+-define(WsOpCF, 16#0).                                               %% 表示一个继续帧（Continuation Frame）
 -define(WsOpText, 16#1).
 -define(WsOpBinary, 16#2).
 -define(WsOpClose, 16#8).
@@ -56,58 +57,58 @@
 -type wsOpCode() :: ?WsOpCF | ?WsOpText | ?WsOpBinary | ?WsOpClose | ?WsOpPing | ?WsOpPong.
 
 %% http header 头
- -type header_key() ::
-    'Cache-Control' |
-    'Connection' |
-    'Date' |
-    'Pragma'|
-    'Transfer-Encoding' |
-    'Upgrade' |
-    'Via' |
-    'Accept' |
-    'Accept-Charset'|
-    'Accept-Encoding' |
-    'Accept-Language' |
-    'Authorization' |
-    'From' |
-    'Host' |
-    'If-Modified-Since' |
-    'If-Match' |
-    'If-None-Match' |
-    'If-Range'|
-    'If-Unmodified-Since' |
-    'Max-Forwards' |
-    'Proxy-Authorization' |
-    'Range'|
-    'Referer' |
-    'User-Agent' |
-    'Age' |
-    'Location' |
-    'Proxy-Authenticate'|
-    'Public' |
-    'Retry-After' |
-    'Server' |
-    'Vary' |
-    'Warning'|
-    'Www-Authenticate' |
-    'Allow' |
-    'Content-Base' |
-    'Content-Encoding'|
-    'Content-Language' |
-    'Content-Length' |
-    'Content-Location'|
-    'Content-Md5' |
-    'Content-Range' |
-    'Content-Type' |
-    'Etag'|
-    'Expires' |
-    'Last-Modified' |
-    'Accept-Ranges' |
-    'Set-Cookie'|
-    'Set-Cookie2' |
-    'X-Forwarded-For' |
-    'Cookie' |
-    'Keep-Alive' |
-    'Proxy-Connection' |
-    binary() |
-    string().
+-type header_key() ::
+'Cache-Control' |
+'Connection' |
+'Date' |
+'Pragma'|
+'Transfer-Encoding' |
+'Upgrade' |
+'Via' |
+'Accept' |
+'Accept-Charset'|
+'Accept-Encoding' |
+'Accept-Language' |
+'Authorization' |
+'From' |
+'Host' |
+'If-Modified-Since' |
+'If-Match' |
+'If-None-Match' |
+'If-Range'|
+'If-Unmodified-Since' |
+'Max-Forwards' |
+'Proxy-Authorization' |
+'Range'|
+'Referer' |
+'User-Agent' |
+'Age' |
+'Location' |
+'Proxy-Authenticate'|
+'Public' |
+'Retry-After' |
+'Server' |
+'Vary' |
+'Warning'|
+'Www-Authenticate' |
+'Allow' |
+'Content-Base' |
+'Content-Encoding'|
+'Content-Language' |
+'Content-Length' |
+'Content-Location'|
+'Content-Md5' |
+'Content-Range' |
+'Content-Type' |
+'Etag'|
+'Expires' |
+'Last-Modified' |
+'Accept-Ranges' |
+'Set-Cookie'|
+'Set-Cookie2' |
+'X-Forwarded-For' |
+'Cookie' |
+'Keep-Alive' |
+'Proxy-Connection' |
+binary() |
+string().

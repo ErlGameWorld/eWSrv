@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta content="width=device-width, initial-scale=1.0" name="viewport">
     <title>eWSrv HTTP 测试中心</title>
     <style>
         * {
@@ -357,1250 +357,1263 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🚀 eWSrv HTTP 测试中心</h1>
-            <p>全面测试 Erlang HTTP 服务器的所有功能</p>
+<div class="container">
+    <div class="header">
+        <h1>🚀 eWSrv HTTP 测试中心</h1>
+        <p>全面测试 Erlang HTTP 服务器的所有功能</p>
+    </div>
+
+    <div class="server-info">
+        <strong>服务器地址:</strong> <code id="serverUrl">http://127.0.0.1:8080</code>
+        <button class="btn btn-secondary" onclick="updateServerUrl()" style="margin-left: 10px;">修改地址</button>
+    </div>
+
+    <div class="tab-container">
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('basic')">基础测试</button>
+            <button class="tab" onclick="switchTab('advanced')">高级功能</button>
+            <button class="tab" onclick="switchTab('file')">文件操作</button>
+            <button class="tab" onclick="switchTab('stream')">流式传输</button>
+            <button class="tab" onclick="switchTab('cors')">CORS 测试</button>
+            <button class="tab" onclick="switchTab('compression')">压缩测试</button>
+            <button class="tab" onclick="switchTab('ws')">WebSocket</button>
         </div>
 
-        <div class="server-info">
-            <strong>服务器地址:</strong> <code id="serverUrl">http://127.0.0.1:8080</code>
-            <button class="btn btn-secondary" onclick="updateServerUrl()" style="margin-left: 10px;">修改地址</button>
-        </div>
-
-        <div class="tab-container">
-            <div class="tabs">
-                <button class="tab active" onclick="switchTab('basic')">基础测试</button>
-                <button class="tab" onclick="switchTab('advanced')">高级功能</button>
-                <button class="tab" onclick="switchTab('file')">文件操作</button>
-                <button class="tab" onclick="switchTab('stream')">流式传输</button>
-                <button class="tab" onclick="switchTab('cors')">CORS 测试</button>
-                <button class="tab" onclick="switchTab('compression')">压缩测试</button>
-                <button class="tab" onclick="switchTab('ws')">WebSocket</button>
-            </div>
-
-            <div id="basic" class="tab-content active">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> Hello World</h3>
-                        <p>基础文本响应测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testEndpoint('GET', '/hello', 'hello')">测试 GET /hello</button>
-                            <button class="btn btn-secondary" onclick="testEndpoint('HEAD', '/hello', 'hello')">测试 HEAD /hello</button>
-                        </div>
-                        <div id="hello-response" class="response"></div>
+        <div class="tab-content active" id="basic">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> Hello World</h3>
+                    <p>基础文本响应测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testEndpoint('GET', '/hello', 'hello')">测试 GET
+                            /hello
+                        </button>
+                        <button class="btn btn-secondary" onclick="testEndpoint('HEAD', '/hello', 'hello')">测试 HEAD
+                            /hello
+                        </button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> JSON 响应</h3>
-                        <p>JSON 数据格式测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testEndpoint('GET', '/json', 'json')">测试 GET /json</button>
-                        </div>
-                        <div id="json-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> HTML 页面</h3>
-                        <p>HTML 内容响应测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testEndpoint('GET', '/html', 'html')">测试 GET /html</button>
-                        </div>
-                        <div id="html-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 查询参数</h3>
-                        <p>URL 参数解析测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="queryParams" placeholder="a=1&b=hello&c=true" value="a=1&b=hello&c=true">
-                            </div>
-                            <button class="btn btn-primary" onclick="testWithQuery()">测试查询参数</button>
-                        </div>
-                        <div id="params-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 请求头</h3>
-                        <p>HTTP 头部信息测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testEndpoint('GET', '/headers', 'headers')">测试 GET /headers</button>
-                        </div>
-                        <div id="headers-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 状态码</h3>
-                        <p>动态状态码响应测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <select id="statusCode">
-                                    <option value="200">200 OK</option>
-                                    <option value="201">201 Created</option>
-                                    <option value="400">400 Bad Request</option>
-                                    <option value="401">401 Unauthorized</option>
-                                    <option value="403">403 Forbidden</option>
-                                    <option value="404">404 Not Found</option>
-                                    <option value="500">500 Internal Server Error</option>
-                                </select>
-                            </div>
-                            <button class="btn btn-primary" onclick="testStatusCode()">测试状态码</button>
-                        </div>
-                        <div id="status-response" class="response"></div>
-                    </div>
+                    <div class="response" id="hello-response"></div>
                 </div>
-            </div>
 
-            <div id="advanced" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method post">POST</span> Echo 回显</h3>
-                        <p>请求体回显测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <textarea id="echoData" rows="3" placeholder="输入要回显的数据...">Hello, Echo Server!</textarea>
-                            </div>
-                            <button class="btn btn-primary" onclick="testEcho()">测试 Echo</button>
-                        </div>
-                        <div id="echo-response" class="response"></div>
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> JSON 响应</h3>
+                    <p>JSON 数据格式测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testEndpoint('GET', '/json', 'json')">测试 GET /json
+                        </button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method post">POST</span> 表单数据</h3>
-                        <p>表单数据处理测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="formData" placeholder="name=John&age=25" value="name=John&age=25">
-                            </div>
-                            <button class="btn btn-primary" onclick="testForm()">测试表单</button>
-                        </div>
-                        <div id="form-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method post">POST</span> JSON 数据</h3>
-                        <p>JSON 数据解析测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <textarea id="jsonData" rows="3" placeholder='{"key": "value"}'>{"message": "Hello JSON", "data": [1,2,3]}</textarea>
-                            </div>
-                            <button class="btn btn-primary" onclick="testJsonPost()">测试 JSON</button>
-                        </div>
-                        <div id="json-post-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method put">PUT</span> 资源更新</h3>
-                        <p>PUT 请求处理测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="resourceId" placeholder="资源ID" value="123">
-                            </div>
-                            <div class="input-group">
-                                <textarea id="updateData" rows="2" placeholder="更新数据">{"status": "updated", "timestamp": "2024-01-01"}</textarea>
-                            </div>
-                            <button class="btn btn-primary" onclick="testPut()">测试 PUT</button>
-                        </div>
-                        <div id="put-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method delete">DELETE</span> 资源删除</h3>
-                        <p>DELETE 请求处理测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="deleteId" placeholder="要删除的资源ID" value="123">
-                            </div>
-                            <button class="btn btn-danger" onclick="testDelete()">测试 DELETE</button>
-                        </div>
-                        <div id="delete-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method options">OPTIONS</span> CORS 预检</h3>
-                        <p>CORS 预检请求测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testOptions()">测试 OPTIONS</button>
-                        </div>
-                        <div id="options-response" class="response"></div>
-                    </div>
+                    <div class="response" id="json-response"></div>
                 </div>
-            </div>
 
-            <div id="file" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 文件下载</h3>
-                        <p>文件下载功能测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testFileDownload()">测试文件下载</button>
-                            <a href="/file" target="_blank" class="btn btn-secondary">直接下载</a>
-                        </div>
-                        <div id="file-response" class="response"></div>
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> HTML 页面</h3>
+                    <p>HTML 内容响应测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testEndpoint('GET', '/html', 'html')">测试 GET /html
+                        </button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 文件片段</h3>
-                        <p>Range 请求测试（部分文件）</p>
-                        <div class="test-controls">
-                            <div class="input-group range-controls">
-                                <label for="rangeStart" class="field-label">起始字节</label>
-                                <input type="number" id="rangeStart" value="0" min="0" class="range-input">
-                                <label for="rangeEnd" class="field-label">结束字节</label>
-                                <input type="number" id="rangeEnd" value="199" min="0" class="range-input" placeholder="留空=至结尾">
-                            </div>
-                            <small class="help-text">提示：留空“结束字节”表示从起始到文件末尾</small>
-                            <div style="margin-top:10px;">
-                                <button class="btn btn-primary" onclick="testFilePart()">测试文件片段</button>
-                            </div>
-                        </div>
-                        <div id="file-part-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method post">POST</span> 文件上传</h3>
-                        <p>文件上传功能测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="file" id="uploadFile" onchange="prepareUpload()">
-                            </div>
-                            <button class="btn btn-primary" onclick="testUpload()" id="uploadBtn" disabled>测试上传</button>
-                        </div>
-                        <div id="upload-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 缓存控制</h3>
-                        <p>缓存控制头部测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testCache()">测试缓存</button>
-                        </div>
-                        <div id="cache-response" class="response"></div>
-                    </div>
+                    <div class="response" id="html-response"></div>
                 </div>
-            </div>
 
-            <div id="stream" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 流式响应</h3>
-                        <p>分块传输流测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testStream()">开始流测试</button>
-                            <button class="btn btn-secondary" onclick="stopStream()">停止</button>
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 查询参数</h3>
+                    <p>URL 参数解析测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="queryParams" placeholder="a=1&b=hello&c=true" type="text"
+                                   value="a=1&b=hello&c=true">
                         </div>
-                        <div id="stream-response" class="response"></div>
+                        <button class="btn btn-primary" onclick="testWithQuery()">测试查询参数</button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 客户端 IP</h3>
-                        <p>获取客户端 IP 地址</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testClientIP()">获取 IP</button>
-                        </div>
-                        <div id="ip-response" class="response"></div>
-                    </div>
+                    <div class="response" id="params-response"></div>
                 </div>
-            </div>
 
-            <div id="cors" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> CORS 测试</h3>
-                        <p>跨域请求测试</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="corsOrigin" placeholder="Origin" value="http://localhost:3000">
-                            </div>
-                            <button class="btn btn-primary" onclick="testCors()">测试 CORS</button>
-                        </div>
-                        <div id="cors-response" class="response"></div>
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 请求头</h3>
+                    <p>HTTP 头部信息测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testEndpoint('GET', '/headers', 'headers')">测试 GET
+                            /headers
+                        </button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method post">POST</span> 跨域 POST</h3>
-                        <p>跨域 POST 请求测试</p>
-                        <div class="test-controls">
-                            <button class="btn btn-primary" onclick="testCorsPost()">测试跨域 POST</button>
-                        </div>
-                        <div id="cors-post-response" class="response"></div>
-                    </div>
+                    <div class="response" id="headers-response"></div>
                 </div>
-            </div>
 
-            <div id="compression" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> GZIP 压缩测试</h3>
-                        <p>测试服务器返回 GZIP 压缩的响应</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <label for="gzipAcceptEncoding">Accept-Encoding:</label>
-                                <input type="text" id="gzipAcceptEncoding" value="gzip" readonly>
-                            </div>
-                            <button class="btn btn-primary" onclick="testGzipCompression()">测试 GZIP 压缩</button>
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 状态码</h3>
+                    <p>动态状态码响应测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <select id="statusCode">
+                                <option value="200">200 OK</option>
+                                <option value="201">201 Created</option>
+                                <option value="400">400 Bad Request</option>
+                                <option value="401">401 Unauthorized</option>
+                                <option value="403">403 Forbidden</option>
+                                <option value="404">404 Not Found</option>
+                                <option value="500">500 Internal Server Error</option>
+                            </select>
                         </div>
-                        <div id="gzip-response" class="response"></div>
+                        <button class="btn btn-primary" onclick="testStatusCode()">测试状态码</button>
                     </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> DEFLATE 压缩测试</h3>
-                        <p>测试服务器返回 DEFLATE 压缩的响应</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <label for="deflateAcceptEncoding">Accept-Encoding:</label>
-                                <input type="text" id="deflateAcceptEncoding" value="deflate" readonly>
-                            </div>
-                            <button class="btn btn-primary" onclick="testDeflateCompression()">测试 DEFLATE 压缩</button>
-                        </div>
-                        <div id="deflate-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3><span class="method get">GET</span> 压缩对比测试</h3>
-                        <p>对比压缩与未压缩的响应大小</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <label for="compareAcceptEncoding">Accept-Encoding:</label>
-                                <select id="compareAcceptEncoding">
-                                    <option value="">无压缩</option>
-                                    <option value="gzip">gzip</option>
-                                    <option value="deflate">deflate</option>
-                                    <option value="gzip, deflate">gzip, deflate</option>
-                                </select>
-                            </div>
-                            <button class="btn btn-primary" onclick="testCompressionCompare()">对比测试</button>
-                        </div>
-                        <div id="compare-response" class="response"></div>
-                    </div>
-                </div>
-            </div>
-
-            <div id="ws" class="tab-content">
-                <div class="test-grid">
-                    <div class="test-card">
-                        <h3>WebSocket 连接</h3>
-                        <p>与服务器进行 WebSocket 握手与消息交互</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <input type="text" id="wsUrlOverride" placeholder="留空使用 serverUrl 自动推导" />
-                            </div>
-                            <button class="btn btn-primary" onclick="connectWS()">连接</button>
-                            <button class="btn btn-secondary" onclick="disconnectWS()">断开</button>
-                        </div>
-                        <div id="ws-status" class="response info">未连接</div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3>发送消息</h3>
-                        <p>发送文本或二进制消息，查看服务器回显</p>
-                        <div class="test-controls">
-                            <div class="input-group">
-                                <textarea id="wsMsgInput" rows="2" placeholder="要发送的文本消息...">Hello via WebSocket!</textarea>
-                            </div>
-                            <button class="btn btn-primary" onclick="sendWsText()">发送文本</button>
-                            <button class="btn btn-secondary" onclick="sendWsBinary()">发送二进制</button>
-                            <button class="btn btn-info" onclick="sendWsPing()">发送 Ping</button>
-                            <button class="btn btn-danger" onclick="closeWs()">关闭连接</button>
-                        </div>
-                        <div id="ws-response" class="response"></div>
-                    </div>
-
-                    <div class="test-card">
-                        <h3>消息记录</h3>
-                        <p>查看接收到的消息</p>
-                        <div class="test-controls">
-                            <button class="btn btn-secondary" onclick="clearWsMessages()">清空消息</button>
-                        </div>
-                        <pre id="ws-messages" class="response info" style="white-space: pre-wrap; max-height: 240px; overflow-y: auto;"></pre>
-                    </div>
+                    <div class="response" id="status-response"></div>
                 </div>
             </div>
         </div>
 
-        <div class="feature-grid">
-            <div class="feature-item">
-                <h4>🎯 基础功能</h4>
-                <p>GET、POST、PUT、DELETE、HEAD、OPTIONS 等 HTTP 方法测试</p>
-            </div>
-            <div class="feature-item">
-                <h4>📄 内容类型</h4>
-                <p>文本、JSON、HTML、文件、流式响应等多种内容格式</p>
-            </div>
-            <div class="feature-item">
-                <h4>🔧 高级特性</h4>
-                <p>查询参数、请求头、状态码、缓存控制、Range 请求</p>
-            </div>
-            <div class="feature-item">
-                <h4>🌐 跨域支持</h4>
-                <p>CORS 预检、跨域请求处理</p>
-            </div>
-            <div class="feature-item">
-                <h4>📁 文件操作</h4>
-                <p>文件下载、上传、部分传输</p>
-            </div>
-            <div class="feature-item">
-                <h4>⚡ 流式传输</h4>
-                <p>分块传输、实时数据流</p>
-            </div>
-            <div class="feature-item">
-                <h4>🔌 WebSocket</h4>
-                <p>实时双向通信、消息推送、连接管理</p>
+        <div class="tab-content" id="advanced">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method post">POST</span> Echo 回显</h3>
+                    <p>请求体回显测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <textarea id="echoData" placeholder="输入要回显的数据..."
+                                      rows="3">Hello, Echo Server!</textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="testEcho()">测试 Echo</button>
+                    </div>
+                    <div class="response" id="echo-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method post">POST</span> 表单数据</h3>
+                    <p>表单数据处理测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="formData" placeholder="name=John&age=25" type="text" value="name=John&age=25">
+                        </div>
+                        <button class="btn btn-primary" onclick="testForm()">测试表单</button>
+                    </div>
+                    <div class="response" id="form-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method post">POST</span> JSON 数据</h3>
+                    <p>JSON 数据解析测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <textarea id="jsonData" placeholder='{"key": "value"}' rows="3">{"message": "Hello JSON", "data": [1,2,3]}</textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="testJsonPost()">测试 JSON</button>
+                    </div>
+                    <div class="response" id="json-post-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method put">PUT</span> 资源更新</h3>
+                    <p>PUT 请求处理测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="resourceId" placeholder="资源ID" type="text" value="123">
+                        </div>
+                        <div class="input-group">
+                            <textarea id="updateData" placeholder="更新数据" rows="2">{"status": "updated", "timestamp": "2024-01-01"}</textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="testPut()">测试 PUT</button>
+                    </div>
+                    <div class="response" id="put-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method delete">DELETE</span> 资源删除</h3>
+                    <p>DELETE 请求处理测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="deleteId" placeholder="要删除的资源ID" type="text" value="123">
+                        </div>
+                        <button class="btn btn-danger" onclick="testDelete()">测试 DELETE</button>
+                    </div>
+                    <div class="response" id="delete-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method options">OPTIONS</span> CORS 预检</h3>
+                    <p>CORS 预检请求测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testOptions()">测试 OPTIONS</button>
+                    </div>
+                    <div class="response" id="options-response"></div>
+                </div>
             </div>
         </div>
 
-        <div class="log-container" id="testLog">
-            <div class="log-entry info">=== eWSrv HTTP 测试中心已启动 ===</div>
+        <div class="tab-content" id="file">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 文件下载</h3>
+                    <p>文件下载功能测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testFileDownload()">测试文件下载</button>
+                        <a class="btn btn-secondary" href="/file" target="_blank">直接下载</a>
+                    </div>
+                    <div class="response" id="file-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 文件片段</h3>
+                    <p>Range 请求测试（部分文件）</p>
+                    <div class="test-controls">
+                        <div class="input-group range-controls">
+                            <label class="field-label" for="rangeStart">起始字节</label>
+                            <input class="range-input" id="rangeStart" min="0" type="number" value="0">
+                            <label class="field-label" for="rangeEnd">结束字节</label>
+                            <input class="range-input" id="rangeEnd" min="0" placeholder="留空=至结尾" type="number"
+                                   value="199">
+                        </div>
+                        <small class="help-text">提示：留空“结束字节”表示从起始到文件末尾</small>
+                        <div style="margin-top:10px;">
+                            <button class="btn btn-primary" onclick="testFilePart()">测试文件片段</button>
+                        </div>
+                    </div>
+                    <div class="response" id="file-part-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method post">POST</span> 文件上传</h3>
+                    <p>文件上传功能测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="uploadFile" onchange="prepareUpload()" type="file">
+                        </div>
+                        <button class="btn btn-primary" disabled id="uploadBtn" onclick="testUpload()">测试上传</button>
+                    </div>
+                    <div class="response" id="upload-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 缓存控制</h3>
+                    <p>缓存控制头部测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testCache()">测试缓存</button>
+                    </div>
+                    <div class="response" id="cache-response"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="stream">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 流式响应</h3>
+                    <p>分块传输流测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testStream()">开始流测试</button>
+                        <button class="btn btn-secondary" onclick="stopStream()">停止</button>
+                    </div>
+                    <div class="response" id="stream-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 客户端 IP</h3>
+                    <p>获取客户端 IP 地址</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testClientIP()">获取 IP</button>
+                    </div>
+                    <div class="response" id="ip-response"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="cors">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> CORS 测试</h3>
+                    <p>跨域请求测试</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="corsOrigin" placeholder="Origin" type="text" value="http://localhost:3000">
+                        </div>
+                        <button class="btn btn-primary" onclick="testCors()">测试 CORS</button>
+                    </div>
+                    <div class="response" id="cors-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method post">POST</span> 跨域 POST</h3>
+                    <p>跨域 POST 请求测试</p>
+                    <div class="test-controls">
+                        <button class="btn btn-primary" onclick="testCorsPost()">测试跨域 POST</button>
+                    </div>
+                    <div class="response" id="cors-post-response"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="compression">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> GZIP 压缩测试</h3>
+                    <p>测试服务器返回 GZIP 压缩的响应</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <label for="gzipAcceptEncoding">Accept-Encoding:</label>
+                            <input id="gzipAcceptEncoding" readonly type="text" value="gzip">
+                        </div>
+                        <button class="btn btn-primary" onclick="testGzipCompression()">测试 GZIP 压缩</button>
+                    </div>
+                    <div class="response" id="gzip-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> DEFLATE 压缩测试</h3>
+                    <p>测试服务器返回 DEFLATE 压缩的响应</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <label for="deflateAcceptEncoding">Accept-Encoding:</label>
+                            <input id="deflateAcceptEncoding" readonly type="text" value="deflate">
+                        </div>
+                        <button class="btn btn-primary" onclick="testDeflateCompression()">测试 DEFLATE 压缩</button>
+                    </div>
+                    <div class="response" id="deflate-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3><span class="method get">GET</span> 压缩对比测试</h3>
+                    <p>对比压缩与未压缩的响应大小</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <label for="compareAcceptEncoding">Accept-Encoding:</label>
+                            <select id="compareAcceptEncoding">
+                                <option value="">无压缩</option>
+                                <option value="gzip">gzip</option>
+                                <option value="deflate">deflate</option>
+                                <option value="gzip, deflate">gzip, deflate</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-primary" onclick="testCompressionCompare()">对比测试</button>
+                    </div>
+                    <div class="response" id="compare-response"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="ws">
+            <div class="test-grid">
+                <div class="test-card">
+                    <h3>WebSocket 连接</h3>
+                    <p>与服务器进行 WebSocket 握手与消息交互</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <input id="wsUrlOverride" placeholder="留空使用 serverUrl 自动推导" type="text"/>
+                        </div>
+                        <button class="btn btn-primary" onclick="connectWS()">连接</button>
+                        <button class="btn btn-secondary" onclick="disconnectWS()">断开</button>
+                    </div>
+                    <div class="response info" id="ws-status">未连接</div>
+                </div>
+
+                <div class="test-card">
+                    <h3>发送消息</h3>
+                    <p>发送文本或二进制消息，查看服务器回显</p>
+                    <div class="test-controls">
+                        <div class="input-group">
+                            <textarea id="wsMsgInput" placeholder="要发送的文本消息..."
+                                      rows="2">Hello via WebSocket!</textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="sendWsText()">发送文本</button>
+                        <button class="btn btn-secondary" onclick="sendWsBinary()">发送二进制</button>
+                        <button class="btn btn-info" onclick="sendWsPing()">发送 Ping</button>
+                        <button class="btn btn-danger" onclick="closeWs()">关闭连接</button>
+                    </div>
+                    <div class="response" id="ws-response"></div>
+                </div>
+
+                <div class="test-card">
+                    <h3>消息记录</h3>
+                    <p>查看接收到的消息</p>
+                    <div class="test-controls">
+                        <button class="btn btn-secondary" onclick="clearWsMessages()">清空消息</button>
+                    </div>
+                    <pre class="response info" id="ws-messages"
+                         style="white-space: pre-wrap; max-height: 240px; overflow-y: auto;"></pre>
+                </div>
+            </div>
         </div>
     </div>
 
-    <script>
-        let serverUrl = (location.origin && /^https?:\/\//i.test(location.origin)) ? location.origin : 'http://127.0.0.1:8080';
-        let streamController = null;
+    <div class="feature-grid">
+        <div class="feature-item">
+            <h4>🎯 基础功能</h4>
+            <p>GET、POST、PUT、DELETE、HEAD、OPTIONS 等 HTTP 方法测试</p>
+        </div>
+        <div class="feature-item">
+            <h4>📄 内容类型</h4>
+            <p>文本、JSON、HTML、文件、流式响应等多种内容格式</p>
+        </div>
+        <div class="feature-item">
+            <h4>🔧 高级特性</h4>
+            <p>查询参数、请求头、状态码、缓存控制、Range 请求</p>
+        </div>
+        <div class="feature-item">
+            <h4>🌐 跨域支持</h4>
+            <p>CORS 预检、跨域请求处理</p>
+        </div>
+        <div class="feature-item">
+            <h4>📁 文件操作</h4>
+            <p>文件下载、上传、部分传输</p>
+        </div>
+        <div class="feature-item">
+            <h4>⚡ 流式传输</h4>
+            <p>分块传输、实时数据流</p>
+        </div>
+        <div class="feature-item">
+            <h4>🔌 WebSocket</h4>
+            <p>实时双向通信、消息推送、连接管理</p>
+        </div>
+    </div>
 
-        // 日志功能
-        function addLog(message, type = 'info') {
-            const logContainer = document.getElementById('testLog');
-            const logEntry = document.createElement('div');
-            logEntry.className = `log-entry ${type}`;
-            const timestamp = new Date().toLocaleTimeString();
-            logEntry.textContent = `[${timestamp}] ${message}`;
-            logContainer.appendChild(logEntry);
-            logContainer.scrollTop = logContainer.scrollHeight;
-        }
+    <div class="log-container" id="testLog">
+        <div class="log-entry info">=== eWSrv HTTP 测试中心已启动 ===</div>
+    </div>
+</div>
 
-        // 标签页切换
-        function switchTab(tabName) {
-            // 隐藏所有标签页内容
-            document.querySelectorAll('.tab-content').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            
-            // 移除所有标签按钮的激活状态
-            document.querySelectorAll('.tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            
-            // 显示选中的标签页内容
-            document.getElementById(tabName).classList.add('active');
-            
-            // 激活对应的标签按钮
-            event.target.classList.add('active');
-        }
+<script>
+    let serverUrl = (location.origin && /^https?:\/\//i.test(location.origin)) ? location.origin : 'http://127.0.0.1:8080';
+    let streamController = null;
+
+    // 日志功能
+    function addLog(message, type = 'info') {
+        const logContainer = document.getElementById('testLog');
+        const logEntry = document.createElement('div');
+        logEntry.className = `log-entry ${type}`;
+        const timestamp = new Date().toLocaleTimeString();
+        logEntry.textContent = `[${timestamp}] ${message}`;
+        logContainer.appendChild(logEntry);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    // 标签页切换
+    function switchTab(tabName) {
+        // 隐藏所有标签页内容
+        document.querySelectorAll('.tab-content').forEach(tab => {
+            tab.classList.remove('active');
+        });
+
+        // 移除所有标签按钮的激活状态
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.classList.remove('active');
+        });
+
+        // 显示选中的标签页内容
+        document.getElementById(tabName).classList.add('active');
+
+        // 激活对应的标签按钮
+        event.target.classList.add('active');
+    }
 
 // 更新服务器地址
 function updateServerUrl() {
-    const newUrl = prompt('请输入服务器地址:', serverUrl);
-    if (newUrl) {
-        let u = newUrl.trim();
-        
-        // 1. 自动补全协议（如果缺失）
-        if (!/^https?:\/\//i.test(u)) {
-            u = 'http://' + u; // 默认使用 http
-        }
-        
-        try {
-            // 2. 使用 URL 构造函数解析
-            const parsedUrl = new URL(u);
-            
-            // 3. 若未指定端口，使用当前页面端口或回退到8080
-            // 注意：URL 构造函数在解析无端口的字符串时，parsedUrl.port 默认为空
-            if (!parsedUrl.port) {
-                // 优先使用当前页面端口，若当前页面端口也未明确指定（如80/443）则使用8080
-                const currentPort = window.location.port;
-                parsedUrl.port = currentPort ? currentPort : '8080';
-            }
-            
-            // 4. 规范化：提取协议、主机名、端口，并重新构建基地址
-            // 这样即使输入包含路径、查询参数或哈希，也会被舍弃
-            const protocol = parsedUrl.protocol; // 包含冒号，如 'http:'
-            const hostname = parsedUrl.hostname;
-            const port = parsedUrl.port;
-            
-            // 5. 直接组合协议、主机名和端口来构建基地址
-            // 注意：如果端口是协议默认端口（如http的80，https的443），组合时通常可以省略，但这里选择显式包含
-            serverUrl = `${protocol}//${hostname}:${port}`;
-            
-        } catch (e) {
-            // 6. 如果 URL 解析失败（例如格式非常不规则），则进行基本清理后使用原始字符串
-            console.error("URL解析错误，使用清理后的输入:", e);
-            // 移除尾部斜杠
-            serverUrl = u.replace(/\/+$/, '');
-            // 可以尝试进一步提取协议和主机部分，但复杂度较高，这里简单处理
-        }
-        
-        // 7. 更新页面显示和日志
-        document.getElementById('serverUrl').textContent = serverUrl;
-        addLog(`服务器地址已更新为: ${serverUrl}`, 'info');
+const newUrl = prompt('请输入服务器地址:', serverUrl);
+if (newUrl) {
+    let u = newUrl.trim();
+
+    // 1. 自动补全协议（如果缺失）
+    if (!/^https?:\/\//i.test(u)) {
+        u = 'http://' + u; // 默认使用 http
     }
+
+    try {
+        // 2. 使用 URL 构造函数解析
+        const parsedUrl = new URL(u);
+
+        // 3. 若未指定端口，使用当前页面端口或回退到8080
+        // 注意：URL 构造函数在解析无端口的字符串时，parsedUrl.port 默认为空
+        if (!parsedUrl.port) {
+            // 优先使用当前页面端口，若当前页面端口也未明确指定（如80/443）则使用8080
+            const currentPort = window.location.port;
+            parsedUrl.port = currentPort ? currentPort : '8080';
+        }
+
+        // 4. 规范化：提取协议、主机名、端口，并重新构建基地址
+        // 这样即使输入包含路径、查询参数或哈希，也会被舍弃
+        const protocol = parsedUrl.protocol; // 包含冒号，如 'http:'
+        const hostname = parsedUrl.hostname;
+        const port = parsedUrl.port;
+
+        // 5. 直接组合协议、主机名和端口来构建基地址
+        // 注意：如果端口是协议默认端口（如http的80，https的443），组合时通常可以省略，但这里选择显式包含
+        serverUrl = `${protocol}//${hostname}:${port}`;
+
+    } catch (e) {
+        // 6. 如果 URL 解析失败（例如格式非常不规则），则进行基本清理后使用原始字符串
+        console.error("URL解析错误，使用清理后的输入:", e);
+        // 移除尾部斜杠
+        serverUrl = u.replace(/\/+$/, '');
+        // 可以尝试进一步提取协议和主机部分，但复杂度较高，这里简单处理
+    }
+
+    // 7. 更新页面显示和日志
+    document.getElementById('serverUrl').textContent = serverUrl;
+    addLog(`服务器地址已更新为: ${serverUrl}`, 'info');
+}
 }
 
-        // 显示响应结果
-        function showResponse(elementId, data, status = 'success') {
-            const element = document.getElementById(elementId);
-            element.textContent = data;
-            element.className = `response ${status}`;
-        }
+    // 显示响应结果
+    function showResponse(elementId, data, status = 'success') {
+        const element = document.getElementById(elementId);
+        element.textContent = data;
+        element.className = `response ${status}`;
+    }
 
-        // 显示加载状态
-        function showLoading(elementId) {
-            const element = document.getElementById(elementId);
-            element.innerHTML = '<span class="status-indicator loading"></span>测试中...';
-            element.className = 'response info';
-        }
+    // 显示加载状态
+    function showLoading(elementId) {
+        const element = document.getElementById(elementId);
+        element.innerHTML = '<span class="status-indicator loading"></span>测试中...';
+        element.className = 'response info';
+    }
 
-        // 基础端点测试
-        async function testEndpoint(method, path, responseId) {
-            showLoading(`${responseId}-response`);
-            addLog(`开始测试 ${method} ${path}`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}${path}`, {
-                    method: method,
-                    headers: method === 'POST' || method === 'PUT' ? {
-                        'Content-Type': 'text/plain'
-                    } : {}
-                });
-                
-                const duration = Date.now() - startTime;
-                let result;
-                
-                if (response.headers.get('content-type')?.includes('application/json')) {
-                    const data = await response.json();
-                    result = `状态码: ${response.status}\n耗时: ${duration}ms\n响应头:\n${formatHeaders(response.headers)}\n\n响应体:\n${JSON.stringify(data, null, 2)}`;
-                } else {
-                    const text = await response.text();
-                    result = `状态码: ${response.status}\n耗时: ${duration}ms\n响应头:\n${formatHeaders(response.headers)}\n\n响应体:\n${text}`;
-                }
-                
-                showResponse(`${responseId}-response`, result, 'success');
-                addLog(`${method} ${path} 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse(`${responseId}-response`, `错误: ${error.message}`, 'error');
-                addLog(`${method} ${path} 测试失败: ${error.message}`, 'error');
-            }
-        }
+    // 基础端点测试
+    async function testEndpoint(method, path, responseId) {
+        showLoading(`${responseId}-response`);
+        addLog(`开始测试 ${method} ${path}`, 'info');
 
-        // 查询参数测试
-        function testWithQuery() {
-            const params = document.getElementById('queryParams').value;
-            testEndpoint('GET', `/params?${params}`, 'params');
-        }
-
-        // 状态码测试
-        function testStatusCode() {
-            const statusCode = document.getElementById('statusCode').value;
-            testEndpoint('GET', `/status/${statusCode}`, 'status');
-        }
-
-        // Echo 测试
-        async function testEcho() {
-            const data = document.getElementById('echoData').value;
-            showLoading('echo-response');
-            addLog('开始测试 POST /echo', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/echo`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'text/plain'
-                    },
-                    body: data
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('echo-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n回显数据:\n${result}`, 'success');
-                addLog(`POST /echo 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('echo-response', `错误: ${error.message}`, 'error');
-                addLog(`POST /echo 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 表单数据测试
-        async function testForm() {
-            const formData = document.getElementById('formData').value;
-            showLoading('form-response');
-            addLog('开始测试 POST /form', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/form`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    body: formData
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('form-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n解析结果:\n${result}`, 'success');
-                addLog(`POST /form 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('form-response', `错误: ${error.message}`, 'error');
-                addLog(`POST /form 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // JSON POST 测试
-        async function testJsonPost() {
-            const jsonData = document.getElementById('jsonData').value;
-            showLoading('json-post-response');
-            addLog('开始测试 POST /json', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/json`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: jsonData
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('json-post-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
-                addLog(`POST /json 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('json-post-response', `错误: ${error.message}`, 'error');
-                addLog(`POST /json 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // PUT 测试
-        async function testPut() {
-            const resourceId = document.getElementById('resourceId').value;
-            const updateData = document.getElementById('updateData').value;
-            showLoading('put-response');
-            addLog(`开始测试 PUT /resource/${resourceId}`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/resource/${resourceId}`, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: updateData
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('put-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
-                addLog(`PUT /resource/${resourceId} 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('put-response', `错误: ${error.message}`, 'error');
-                addLog(`PUT /resource/${resourceId} 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // DELETE 测试
-        async function testDelete() {
-            const deleteId = document.getElementById('deleteId').value;
-            showLoading('delete-response');
-            addLog(`开始测试 DELETE /resource/${deleteId}`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/resource/${deleteId}`, {
-                    method: 'DELETE'
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('delete-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
-                addLog(`DELETE /resource/${deleteId} 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('delete-response', `错误: ${error.message}`, 'error');
-                addLog(`DELETE /resource/${deleteId} 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // OPTIONS 测试
-        async function testOptions() {
-            showLoading('options-response');
-            addLog('开始测试 OPTIONS /api/test', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/api/test`, {
-                    method: 'OPTIONS'
-                });
-                
-                const duration = Date.now() - startTime;
-                
-                showResponse('options-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应头:\n${formatHeaders(response.headers)}`, 'success');
-                addLog(`OPTIONS /api/test 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('options-response', `错误: ${error.message}`, 'error');
-                addLog(`OPTIONS /api/test 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 文件下载测试
-        async function testFileDownload() {
-            showLoading('file-response');
-            addLog('开始测试文件下载', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/file`);
-                
-                const duration = Date.now() - startTime;
-                const contentLength = response.headers.get('content-length');
-                const contentType = response.headers.get('content-type');
-                
-                showResponse('file-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n文件大小: ${contentLength || '未知'} 字节\n内容类型: ${contentType || '未知'}\n\n文件下载链接已准备就绪`, 'success');
-                addLog(`文件下载测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('file-response', `错误: ${error.message}`, 'error');
-                addLog(`文件下载测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 文件片段测试
-        async function testFilePart() {
-            showLoading('file-part-response');
-            addLog('开始测试文件片段下载', 'info');
-            
-            try {
-                const start = parseInt(document.getElementById('rangeStart')?.value || '0', 10);
-                const end = parseInt(document.getElementById('rangeEnd')?.value || '199', 10);
-                const rangeHeader = `bytes=${isNaN(start)?0:start}-${isNaN(end)?'' : end}`;
-
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/range`, {
-                    headers: { 'Range': rangeHeader }
-                });
-                
-                const duration = Date.now() - startTime;
-                const contentLength = response.headers.get('content-length');
-                
-                showResponse('file-part-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n片段大小: ${contentLength || '未知'} 字节\nRange: ${rangeHeader}\n\n文件片段下载成功`, 'success');
-                addLog(`文件片段测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('file-part-response', `错误: ${error.message}`, 'error');
-                addLog(`文件片段测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 文件上传准备
-        let uploadFileData = null;
-        function prepareUpload() {
-            const fileInput = document.getElementById('uploadFile');
-            const file = fileInput.files[0];
-            
-            if (file) {
-                uploadFileData = file;
-                document.getElementById('uploadBtn').disabled = false;
-                addLog(`已选择文件: ${file.name} (${file.size} 字节)`, 'info');
-            } else {
-                uploadFileData = null;
-                document.getElementById('uploadBtn').disabled = true;
-            }
-        }
-
-        // 文件上传测试
-        async function testUpload() {
-            if (!uploadFileData) {
-                showResponse('upload-response', '请先选择文件', 'error');
-                return;
-            }
-            
-            showLoading('upload-response');
-            addLog(`开始上传文件: ${uploadFileData.name}`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const formData = new FormData();
-                formData.append('file', uploadFileData);
-                
-                const response = await fetch(`${serverUrl}/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('upload-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n文件大小: ${uploadFileData.size} 字节\n\n响应:\n${result}`, 'success');
-                addLog(`文件上传成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('upload-response', `错误: ${error.message}`, 'error');
-                addLog(`文件上传失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 缓存测试
-        async function testCache() {
-            showLoading('cache-response');
-            addLog('开始测试缓存控制', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/cache`);
-                
-                const duration = Date.now() - startTime;
-                const etag = response.headers.get('etag');
-                const cacheControl = response.headers.get('cache-control');
-                const lastModified = response.headers.get('last-modified');
-                
-                showResponse('cache-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\nETag: ${etag || '无'}\nCache-Control: ${cacheControl || '无'}\nLast-Modified: ${lastModified || '无'}\n\n缓存控制头部测试成功`, 'success');
-                addLog(`缓存控制测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('cache-response', `错误: ${error.message}`, 'error');
-                addLog(`缓存控制测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 流式传输测试
-        async function testStream() {
-            showLoading('stream-response');
-            addLog('开始测试流式传输', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/stream`);
-                
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let chunks = [];
-                
-                showResponse('stream-response', 
-                    `状态码: ${response.status}\n开始接收流数据...\n\n接收到的数据:\n`, 'info');
-                
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    
-                    const chunk = decoder.decode(value);
-                    chunks.push(chunk);
-                    
-                    // 实时更新显示
-                    const currentData = document.getElementById('stream-response').textContent;
-                    document.getElementById('stream-response').textContent = currentData + chunk;
-                }
-                
-                const duration = Date.now() - startTime;
-                addLog(`流式传输测试完成 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('stream-response', `错误: ${error.message}`, 'error');
-                addLog(`流式传输测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 停止流
-        function stopStream() {
-            if (streamController) {
-                streamController.abort();
-                streamController = null;
-                addLog('流式传输已停止', 'info');
-            }
-        }
-
-        // 客户端 IP 测试
-        async function testClientIP() {
-            showLoading('ip-response');
-            addLog('开始获取客户端 IP', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/ip`);
-                
-                const duration = Date.now() - startTime;
-                const result = await response.text();
-                
-                showResponse('ip-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n客户端信息:\n${result}`, 'success');
-                addLog(`客户端 IP 获取成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('ip-response', `错误: ${error.message}`, 'error');
-                addLog(`客户端 IP 获取失败: ${error.message}`, 'error');
-            }
-        }
-
-        // CORS 测试
-        async function testCors() {
-            const origin = document.getElementById('corsOrigin').value;
-            showLoading('cors-response');
-            addLog(`开始测试 CORS (Origin: ${origin})`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/api/test`, {
-                    method: 'GET',
-                    headers: {
-                        'Origin': origin
-                    }
-                });
-                
-                const duration = Date.now() - startTime;
-                
-                showResponse('cors-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\nAccess-Control-Allow-Origin: ${acao || '无'}\nAccess-Control-Allow-Methods: ${acam || '无'}\n\nCORS 测试完成`, 'success');
-                addLog(`CORS 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('cors-response', `错误: ${error.message}`, 'error');
-                addLog(`CORS 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 跨域 POST 测试
-        async function testCorsPost() {
-            showLoading('cors-post-response');
-            addLog('开始测试跨域 POST 请求', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/api/data`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Origin': 'http://localhost:3000'
-                    },
-                    body: JSON.stringify({ test: 'cors data' })
-                });
-                
-                const duration = Date.now() - startTime;
-                
-                showResponse('cors-post-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n\n跨域 POST 测试完成`, 'success');
-                addLog(`跨域 POST 测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('cors-post-response', `错误: ${error.message}`, 'error');
-                addLog(`跨域 POST 测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 工具函数：格式化响应头
-        function formatHeaders(headers) {
-            const headerEntries = [];
-            for (let [key, value] of headers.entries()) {
-                headerEntries.push(`${key}: ${value}`);
-            }
-            return headerEntries.join('\n');
-        }
-
-        // 重定向测试
-        async function testRedirect() {
-            showLoading('redirect-response');
-            addLog('开始测试重定向', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/redirect`, {
-                    redirect: 'follow'
-                });
-                
-                const duration = Date.now() - startTime;
-                const finalUrl = response.url;
-                
-                showResponse('redirect-response', 
-                    `最终状态码: ${response.status}\n耗时: ${duration}ms\n最终URL: ${finalUrl}\n\n重定向测试完成`, 'success');
-                addLog(`重定向测试成功 (${response.status}, ${duration}ms)`, 'success');
-                
-            } catch (error) {
-                showResponse('redirect-response', `错误: ${error.message}`, 'error');
-                addLog(`重定向测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // GZIP 压缩测试
-        async function testGzipCompression() {
-            showLoading('gzip-response');
-            addLog('开始测试 GZIP 压缩', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/compressed`, {
-                    headers: {
-                        'Accept-Encoding': 'gzip'
-                    }
-                });
-                
-                const duration = Date.now() - startTime;
-                const contentEncoding = response.headers.get('content-encoding');
-                const contentLength = response.headers.get('content-length');
-                
-                // 检查响应是否被压缩
-                const isCompressed = contentEncoding === 'gzip';
-                
-                // 获取响应体（浏览器会自动解压）
-                const result = await response.text();
-                
-                showResponse('gzip-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n响应大小: ${contentLength || '未知'} 字节\n压缩状态: ${isCompressed ? '✓ 已压缩' : '✗ 未压缩'}\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
-                addLog(`GZIP 压缩测试成功 (${response.status}, ${duration}ms, ${isCompressed ? '已压缩' : '未压缩'})`, 'success');
-                
-            } catch (error) {
-                showResponse('gzip-response', `错误: ${error.message}`, 'error');
-                addLog(`GZIP 压缩测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // DEFLATE 压缩测试
-        async function testDeflateCompression() {
-            showLoading('deflate-response');
-            addLog('开始测试 DEFLATE 压缩', 'info');
-            
-            try {
-                const startTime = Date.now();
-                const response = await fetch(`${serverUrl}/compressed`, {
-                    headers: {
-                        'Accept-Encoding': 'deflate'
-                    }
-                });
-                
-                const duration = Date.now() - startTime;
-                const contentEncoding = response.headers.get('content-encoding');
-                const contentLength = response.headers.get('content-length');
-                
-                // 检查响应是否被压缩
-                const isCompressed = contentEncoding === 'deflate';
-                
-                // 获取响应体（浏览器会自动解压）
-                const result = await response.text();
-                
-                showResponse('deflate-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n响应大小: ${contentLength || '未知'} 字节\n压缩状态: ${isCompressed ? '✓ 已压缩' : '✗ 未压缩'}\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
-                addLog(`DEFLATE 压缩测试成功 (${response.status}, ${duration}ms, ${isCompressed ? '已压缩' : '未压缩'})`, 'success');
-                
-            } catch (error) {
-                showResponse('deflate-response', `错误: ${error.message}`, 'error');
-                addLog(`DEFLATE 压缩测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 压缩对比测试
-        async function testCompressionCompare() {
-            const acceptEncoding = document.getElementById('compareAcceptEncoding').value;
-            showLoading('compare-response');
-            addLog(`开始压缩对比测试 (Accept-Encoding: ${acceptEncoding || '无'})`, 'info');
-            
-            try {
-                const startTime = Date.now();
-                const headers = acceptEncoding ? {
-                    'Accept-Encoding': acceptEncoding
-                } : {};
-                
-                const response = await fetch(`${serverUrl}/compressed`, { headers });
-                
-                const duration = Date.now() - startTime;
-                const contentEncoding = response.headers.get('content-encoding');
-                const contentLength = response.headers.get('content-length');
-                
-                // 获取响应体
-                const result = await response.text();
-                const originalSize = result.length;
-                const compressedSize = parseInt(contentLength) || originalSize;
-                const compressionRatio = originalSize > 0 ? ((originalSize - compressedSize) / originalSize * 100).toFixed(1) : 0;
-                
-                showResponse('compare-response', 
-                    `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n原始大小: ${originalSize} 字节\n压缩后大小: ${compressedSize} 字节\n压缩率: ${compressionRatio}%\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
-                addLog(`压缩对比测试成功 (${response.status}, ${duration}ms, 压缩率: ${compressionRatio}%)`, 'success');
-                
-            } catch (error) {
-                showResponse('compare-response', `错误: ${error.message}`, 'error');
-                addLog(`压缩对比测试失败: ${error.message}`, 'error');
-            }
-        }
-
-        // 页面加载完成后的初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            addLog('测试页面已加载完成', 'info');
-            addLog('服务器地址: ' + serverUrl, 'info');
-            addLog('所有测试功能已准备就绪', 'success');
-            // 页面加载完成后，同步展示当前 serverUrl
-            document.getElementById('serverUrl').textContent = serverUrl;
-        });
-
-        // ===== WebSocket 客户端逻辑 =====
-        let wsClient = null;
-
-        function getWsUrl() {
-            const override = document.getElementById('wsUrlOverride')?.value.trim();
-            if (override) {
-                try {
-                    const u = new URL(override);
-                    const scheme = (u.protocol === 'https:') ? 'wss:' : (u.protocol === 'http:' ? 'ws:' : u.protocol);
-                    const port = u.port || (scheme === 'wss:' ? '443' : '8080');
-                    return `${scheme}//${u.hostname}:${port}${u.pathname || ''}`;
-                } catch(_) {
-                    return override.replace(/^http/i, 'ws');
-                }
-            }
-            try {
-                const u = new URL(serverUrl);
-                const scheme = u.protocol === 'https:' ? 'wss:' : 'ws:';
-                return `${scheme}//${u.hostname}:${u.port}/ws`;
-            } catch(_) {
-                return serverUrl.replace(/^http/i, 'ws') + '/ws';
-            }
-        }
-
-        function updateWsStatus(text, type='info') {
-            const el = document.getElementById('ws-status');
-            if (el) {
-                el.textContent = text;
-                el.className = `response ${type}`;
-            }
-        }
-
-        function appendWsMessage(prefix, data) {
-            const box = document.getElementById('ws-messages');
-            if (!box) return;
-            const ts = new Date().toLocaleTimeString();
-            const msg = `[${ts}] ${prefix}: ${data}\n`;
-            box.textContent += msg;
-            box.scrollTop = box.scrollHeight;
-        }
-
-        function connectWS() {
-            if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-                addLog('WebSocket 已连接，无需重复连接', 'info');
-                return;
-            }
-            const url = getWsUrl();
-            addLog(`尝试连接 WebSocket: ${url}`, 'info');
-            try {
-                wsClient = new WebSocket(url);
-            } catch (e) {
-                updateWsStatus(`连接错误: ${e.message}`, 'error');
-                addLog(`WebSocket 连接异常: ${e.message}`, 'error');
-                return;
-            }
-            wsClient.onopen = () => {
-                updateWsStatus(`已连接: ${url}`, 'success');
-                showResponse('ws-response', `连接成功: ${url}`, 'success');
-                addLog('WebSocket 握手完成，连接已打开', 'success');
-            };
-            wsClient.onmessage = (ev) => {
-                const data = typeof ev.data === 'string' ? ev.data : '[Binary] ' + (ev.data?.size || '');
-                appendWsMessage('收到', data);
-            };
-            wsClient.onerror = (ev) => {
-                updateWsStatus('连接错误', 'error');
-                addLog('WebSocket 发生错误', 'error');
-            };
-            wsClient.onclose = (ev) => {
-                updateWsStatus(`已断开 (code=${ev.code})`, 'info');
-                addLog(`WebSocket 已关闭 (code=${ev.code})`, 'info');
-            };
-        }
-
-        function disconnectWS() {
-            if (wsClient) {
-                wsClient.close(1000, 'client requested');
-            } else {
-                addLog('WebSocket 尚未连接', 'info');
-            }
-        }
-
-        function sendWsText() {
-            const text = document.getElementById('wsMsgInput')?.value || '';
-            if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
-                showResponse('ws-response', '请先连接 WebSocket', 'error');
-                return;
-            }
-            wsClient.send(text);
-            appendWsMessage('发送', text);
-            showResponse('ws-response', `已发送文本 (${text.length}字节)`, 'success');
-        }
-
-        function sendWsBinary() {
-            if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
-                showResponse('ws-response', '请先连接 WebSocket', 'error');
-                return;
-            }
-            const bytes = new Uint8Array([1,2,3,4,5,6,7,8,9,0]);
-            wsClient.send(bytes);
-            appendWsMessage('发送', '[Binary] ' + bytes.length + ' bytes');
-            showResponse('ws-response', `已发送二进制 (${bytes.length}字节)`, 'success');
-        }
-
-        function sendWsPing() {
-            if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
-                showResponse('ws-response', '请先连接 WebSocket', 'error');
-                return;
-            }
-            
-            const pingData = 'ping-' + Date.now();
+        try {
             const startTime = Date.now();
-            
-            // 监听pong响应
-            const pongHandler = (event) => {
-                const endTime = Date.now();
-                const latency = endTime - startTime;
-                appendWsMessage('收到 Pong', `延迟: ${latency}ms, 数据: ${event.data}`);
-                showResponse('ws-response', `Ping-Pong 完成 (延迟: ${latency}ms)`, 'success');
-                
-                // 移除事件监听器
-                wsClient.removeEventListener('message', pongHandler);
-            };
-            
-            wsClient.addEventListener('message', pongHandler);
-            
-            // 发送ping
-            wsClient.send(pingData);
-            appendWsMessage('发送 Ping', pingData);
-            showResponse('ws-response', `已发送 Ping (等待 Pong 响应...)`, 'info');
-            
-            // 设置超时（5秒）
-            setTimeout(() => {
-                wsClient.removeEventListener('message', pongHandler);
-                if (wsClient.readyState === WebSocket.OPEN) {
-                    showResponse('ws-response', 'Ping 超时 (5秒内未收到 Pong)', 'error');
-                    appendWsMessage('超时', 'Ping 请求超时');
-                }
-            }, 5000);
+            const response = await fetch(`${serverUrl}${path}`, {
+                method: method,
+                headers: method === 'POST' || method === 'PUT' ? {
+                    'Content-Type': 'text/plain'
+                } : {}
+            });
+
+            const duration = Date.now() - startTime;
+            let result;
+
+            if (response.headers.get('content-type')?.includes('application/json')) {
+                const data = await response.json();
+                result = `状态码: ${response.status}\n耗时: ${duration}ms\n响应头:\n${formatHeaders(response.headers)}\n\n响应体:\n${JSON.stringify(data, null, 2)}`;
+            } else {
+                const text = await response.text();
+                result = `状态码: ${response.status}\n耗时: ${duration}ms\n响应头:\n${formatHeaders(response.headers)}\n\n响应体:\n${text}`;
+            }
+
+            showResponse(`${responseId}-response`, result, 'success');
+            addLog(`${method} ${path} 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse(`${responseId}-response`, `错误: ${error.message}`, 'error');
+            addLog(`${method} ${path} 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 查询参数测试
+    function testWithQuery() {
+        const params = document.getElementById('queryParams').value;
+        testEndpoint('GET', `/params?${params}`, 'params');
+    }
+
+    // 状态码测试
+    function testStatusCode() {
+        const statusCode = document.getElementById('statusCode').value;
+        testEndpoint('GET', `/status/${statusCode}`, 'status');
+    }
+
+    // Echo 测试
+    async function testEcho() {
+        const data = document.getElementById('echoData').value;
+        showLoading('echo-response');
+        addLog('开始测试 POST /echo', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/echo`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'text/plain'
+                },
+                body: data
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('echo-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n回显数据:\n${result}`, 'success');
+            addLog(`POST /echo 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('echo-response', `错误: ${error.message}`, 'error');
+            addLog(`POST /echo 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 表单数据测试
+    async function testForm() {
+        const formData = document.getElementById('formData').value;
+        showLoading('form-response');
+        addLog('开始测试 POST /form', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/form`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: formData
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('form-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n解析结果:\n${result}`, 'success');
+            addLog(`POST /form 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('form-response', `错误: ${error.message}`, 'error');
+            addLog(`POST /form 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // JSON POST 测试
+    async function testJsonPost() {
+        const jsonData = document.getElementById('jsonData').value;
+        showLoading('json-post-response');
+        addLog('开始测试 POST /json', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/json`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: jsonData
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('json-post-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
+            addLog(`POST /json 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('json-post-response', `错误: ${error.message}`, 'error');
+            addLog(`POST /json 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // PUT 测试
+    async function testPut() {
+        const resourceId = document.getElementById('resourceId').value;
+        const updateData = document.getElementById('updateData').value;
+        showLoading('put-response');
+        addLog(`开始测试 PUT /resource/${resourceId}`, 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/resource/${resourceId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: updateData
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('put-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
+            addLog(`PUT /resource/${resourceId} 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('put-response', `错误: ${error.message}`, 'error');
+            addLog(`PUT /resource/${resourceId} 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // DELETE 测试
+    async function testDelete() {
+        const deleteId = document.getElementById('deleteId').value;
+        showLoading('delete-response');
+        addLog(`开始测试 DELETE /resource/${deleteId}`, 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/resource/${deleteId}`, {
+                method: 'DELETE'
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('delete-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应:\n${result}`, 'success');
+            addLog(`DELETE /resource/${deleteId} 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('delete-response', `错误: ${error.message}`, 'error');
+            addLog(`DELETE /resource/${deleteId} 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // OPTIONS 测试
+    async function testOptions() {
+        showLoading('options-response');
+        addLog('开始测试 OPTIONS /api/test', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/api/test`, {
+                method: 'OPTIONS'
+            });
+
+            const duration = Date.now() - startTime;
+
+            showResponse('options-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n响应头:\n${formatHeaders(response.headers)}`, 'success');
+            addLog(`OPTIONS /api/test 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('options-response', `错误: ${error.message}`, 'error');
+            addLog(`OPTIONS /api/test 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 文件下载测试
+    async function testFileDownload() {
+        showLoading('file-response');
+        addLog('开始测试文件下载', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/file`);
+
+            const duration = Date.now() - startTime;
+            const contentLength = response.headers.get('content-length');
+            const contentType = response.headers.get('content-type');
+
+            showResponse('file-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n文件大小: ${contentLength || '未知'} 字节\n内容类型: ${contentType || '未知'}\n\n文件下载链接已准备就绪`, 'success');
+            addLog(`文件下载测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('file-response', `错误: ${error.message}`, 'error');
+            addLog(`文件下载测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 文件片段测试
+    async function testFilePart() {
+        showLoading('file-part-response');
+        addLog('开始测试文件片段下载', 'info');
+
+        try {
+            const start = parseInt(document.getElementById('rangeStart')?.value || '0', 10);
+            const end = parseInt(document.getElementById('rangeEnd')?.value || '199', 10);
+            const rangeHeader = `bytes=${isNaN(start)?0:start}-${isNaN(end)?'' : end}`;
+
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/range`, {
+                headers: { 'Range': rangeHeader }
+            });
+
+            const duration = Date.now() - startTime;
+            const contentLength = response.headers.get('content-length');
+
+            showResponse('file-part-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n片段大小: ${contentLength || '未知'} 字节\nRange: ${rangeHeader}\n\n文件片段下载成功`, 'success');
+            addLog(`文件片段测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('file-part-response', `错误: ${error.message}`, 'error');
+            addLog(`文件片段测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 文件上传准备
+    let uploadFileData = null;
+    function prepareUpload() {
+        const fileInput = document.getElementById('uploadFile');
+        const file = fileInput.files[0];
+
+        if (file) {
+            uploadFileData = file;
+            document.getElementById('uploadBtn').disabled = false;
+            addLog(`已选择文件: ${file.name} (${file.size} 字节)`, 'info');
+        } else {
+            uploadFileData = null;
+            document.getElementById('uploadBtn').disabled = true;
+        }
+    }
+
+    // 文件上传测试
+    async function testUpload() {
+        if (!uploadFileData) {
+            showResponse('upload-response', '请先选择文件', 'error');
+            return;
         }
 
-        function closeWs() {
-            if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-                wsClient.close(1000, 'client close');
+        showLoading('upload-response');
+        addLog(`开始上传文件: ${uploadFileData.name}`, 'info');
+
+        try {
+            const startTime = Date.now();
+            const formData = new FormData();
+            formData.append('file', uploadFileData);
+
+            const response = await fetch(`${serverUrl}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('upload-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n文件大小: ${uploadFileData.size} 字节\n\n响应:\n${result}`, 'success');
+            addLog(`文件上传成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('upload-response', `错误: ${error.message}`, 'error');
+            addLog(`文件上传失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 缓存测试
+    async function testCache() {
+        showLoading('cache-response');
+        addLog('开始测试缓存控制', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/cache`);
+
+            const duration = Date.now() - startTime;
+            const etag = response.headers.get('etag');
+            const cacheControl = response.headers.get('cache-control');
+            const lastModified = response.headers.get('last-modified');
+
+            showResponse('cache-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\nETag: ${etag || '无'}\nCache-Control: ${cacheControl || '无'}\nLast-Modified: ${lastModified || '无'}\n\n缓存控制头部测试成功`, 'success');
+            addLog(`缓存控制测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('cache-response', `错误: ${error.message}`, 'error');
+            addLog(`缓存控制测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 流式传输测试
+    async function testStream() {
+        showLoading('stream-response');
+        addLog('开始测试流式传输', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/stream`);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let chunks = [];
+
+            showResponse('stream-response',
+                `状态码: ${response.status}\n开始接收流数据...\n\n接收到的数据:\n`, 'info');
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value);
+                chunks.push(chunk);
+
+                // 实时更新显示
+                const currentData = document.getElementById('stream-response').textContent;
+                document.getElementById('stream-response').textContent = currentData + chunk;
+            }
+
+            const duration = Date.now() - startTime;
+            addLog(`流式传输测试完成 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('stream-response', `错误: ${error.message}`, 'error');
+            addLog(`流式传输测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 停止流
+    function stopStream() {
+        if (streamController) {
+            streamController.abort();
+            streamController = null;
+            addLog('流式传输已停止', 'info');
+        }
+    }
+
+    // 客户端 IP 测试
+    async function testClientIP() {
+        showLoading('ip-response');
+        addLog('开始获取客户端 IP', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/ip`);
+
+            const duration = Date.now() - startTime;
+            const result = await response.text();
+
+            showResponse('ip-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n客户端信息:\n${result}`, 'success');
+            addLog(`客户端 IP 获取成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('ip-response', `错误: ${error.message}`, 'error');
+            addLog(`客户端 IP 获取失败: ${error.message}`, 'error');
+        }
+    }
+
+    // CORS 测试
+    async function testCors() {
+        const origin = document.getElementById('corsOrigin').value;
+        showLoading('cors-response');
+        addLog(`开始测试 CORS (Origin: ${origin})`, 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/api/test`, {
+                method: 'GET',
+                headers: {
+                    'Origin': origin
+                }
+            });
+
+            const duration = Date.now() - startTime;
+
+            showResponse('cors-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\nAccess-Control-Allow-Origin: ${acao || '无'}\nAccess-Control-Allow-Methods: ${acam || '无'}\n\nCORS 测试完成`, 'success');
+            addLog(`CORS 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('cors-response', `错误: ${error.message}`, 'error');
+            addLog(`CORS 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 跨域 POST 测试
+    async function testCorsPost() {
+        showLoading('cors-post-response');
+        addLog('开始测试跨域 POST 请求', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/api/data`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Origin': 'http://localhost:3000'
+                },
+                body: JSON.stringify({ test: 'cors data' })
+            });
+
+            const duration = Date.now() - startTime;
+
+            showResponse('cors-post-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n\n跨域 POST 测试完成`, 'success');
+            addLog(`跨域 POST 测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('cors-post-response', `错误: ${error.message}`, 'error');
+            addLog(`跨域 POST 测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 工具函数：格式化响应头
+    function formatHeaders(headers) {
+        const headerEntries = [];
+        for (let [key, value] of headers.entries()) {
+            headerEntries.push(`${key}: ${value}`);
+        }
+        return headerEntries.join('\n');
+    }
+
+    // 重定向测试
+    async function testRedirect() {
+        showLoading('redirect-response');
+        addLog('开始测试重定向', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/redirect`, {
+                redirect: 'follow'
+            });
+
+            const duration = Date.now() - startTime;
+            const finalUrl = response.url;
+
+            showResponse('redirect-response',
+                `最终状态码: ${response.status}\n耗时: ${duration}ms\n最终URL: ${finalUrl}\n\n重定向测试完成`, 'success');
+            addLog(`重定向测试成功 (${response.status}, ${duration}ms)`, 'success');
+
+        } catch (error) {
+            showResponse('redirect-response', `错误: ${error.message}`, 'error');
+            addLog(`重定向测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // GZIP 压缩测试
+    async function testGzipCompression() {
+        showLoading('gzip-response');
+        addLog('开始测试 GZIP 压缩', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/compressed`, {
+                headers: {
+                    'Accept-Encoding': 'gzip'
+                }
+            });
+
+            const duration = Date.now() - startTime;
+            const contentEncoding = response.headers.get('content-encoding');
+            const contentLength = response.headers.get('content-length');
+
+            // 检查响应是否被压缩
+            const isCompressed = contentEncoding === 'gzip';
+
+            // 获取响应体（浏览器会自动解压）
+            const result = await response.text();
+
+            showResponse('gzip-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n响应大小: ${contentLength || '未知'} 字节\n压缩状态: ${isCompressed ? '✓ 已压缩' : '✗ 未压缩'}\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
+            addLog(`GZIP 压缩测试成功 (${response.status}, ${duration}ms, ${isCompressed ? '已压缩' : '未压缩'})`, 'success');
+
+        } catch (error) {
+            showResponse('gzip-response', `错误: ${error.message}`, 'error');
+            addLog(`GZIP 压缩测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // DEFLATE 压缩测试
+    async function testDeflateCompression() {
+        showLoading('deflate-response');
+        addLog('开始测试 DEFLATE 压缩', 'info');
+
+        try {
+            const startTime = Date.now();
+            const response = await fetch(`${serverUrl}/compressed`, {
+                headers: {
+                    'Accept-Encoding': 'deflate'
+                }
+            });
+
+            const duration = Date.now() - startTime;
+            const contentEncoding = response.headers.get('content-encoding');
+            const contentLength = response.headers.get('content-length');
+
+            // 检查响应是否被压缩
+            const isCompressed = contentEncoding === 'deflate';
+
+            // 获取响应体（浏览器会自动解压）
+            const result = await response.text();
+
+            showResponse('deflate-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n响应大小: ${contentLength || '未知'} 字节\n压缩状态: ${isCompressed ? '✓ 已压缩' : '✗ 未压缩'}\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
+            addLog(`DEFLATE 压缩测试成功 (${response.status}, ${duration}ms, ${isCompressed ? '已压缩' : '未压缩'})`, 'success');
+
+        } catch (error) {
+            showResponse('deflate-response', `错误: ${error.message}`, 'error');
+            addLog(`DEFLATE 压缩测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 压缩对比测试
+    async function testCompressionCompare() {
+        const acceptEncoding = document.getElementById('compareAcceptEncoding').value;
+        showLoading('compare-response');
+        addLog(`开始压缩对比测试 (Accept-Encoding: ${acceptEncoding || '无'})`, 'info');
+
+        try {
+            const startTime = Date.now();
+            const headers = acceptEncoding ? {
+                'Accept-Encoding': acceptEncoding
+            } : {};
+
+            const response = await fetch(`${serverUrl}/compressed`, { headers });
+
+            const duration = Date.now() - startTime;
+            const contentEncoding = response.headers.get('content-encoding');
+            const contentLength = response.headers.get('content-length');
+
+            // 获取响应体
+            const result = await response.text();
+            const originalSize = result.length;
+            const compressedSize = parseInt(contentLength) || originalSize;
+            const compressionRatio = originalSize > 0 ? ((originalSize - compressedSize) / originalSize * 100).toFixed(1) : 0;
+
+            showResponse('compare-response',
+                `状态码: ${response.status}\n耗时: ${duration}ms\n压缩算法: ${contentEncoding || '无'}\n原始大小: ${originalSize} 字节\n压缩后大小: ${compressedSize} 字节\n压缩率: ${compressionRatio}%\n\n响应体预览（前200字符）:\n${result.substring(0, 200)}${result.length > 200 ? '...' : ''}`, 'success');
+            addLog(`压缩对比测试成功 (${response.status}, ${duration}ms, 压缩率: ${compressionRatio}%)`, 'success');
+
+        } catch (error) {
+            showResponse('compare-response', `错误: ${error.message}`, 'error');
+            addLog(`压缩对比测试失败: ${error.message}`, 'error');
+        }
+    }
+
+    // 页面加载完成后的初始化
+    document.addEventListener('DOMContentLoaded', function() {
+        addLog('测试页面已加载完成', 'info');
+        addLog('服务器地址: ' + serverUrl, 'info');
+        addLog('所有测试功能已准备就绪', 'success');
+        // 页面加载完成后，同步展示当前 serverUrl
+        document.getElementById('serverUrl').textContent = serverUrl;
+    });
+
+    // ===== WebSocket 客户端逻辑 =====
+    let wsClient = null;
+
+    function getWsUrl() {
+        const override = document.getElementById('wsUrlOverride')?.value.trim();
+        if (override) {
+            try {
+                const u = new URL(override);
+                const scheme = (u.protocol === 'https:') ? 'wss:' : (u.protocol === 'http:' ? 'ws:' : u.protocol);
+                const port = u.port || (scheme === 'wss:' ? '443' : '8080');
+                return `${scheme}//${u.hostname}:${port}${u.pathname || ''}`;
+            } catch(_) {
+                return override.replace(/^http/i, 'ws');
             }
         }
-
-        function clearWsMessages() {
-            const box = document.getElementById('ws-messages');
-            if (box) box.textContent = '';
+        try {
+            const u = new URL(serverUrl);
+            const scheme = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${scheme}//${u.hostname}:${u.port}/ws`;
+        } catch(_) {
+            return serverUrl.replace(/^http/i, 'ws') + '/ws';
         }
-    </script>
+    }
+
+    function updateWsStatus(text, type='info') {
+        const el = document.getElementById('ws-status');
+        if (el) {
+            el.textContent = text;
+            el.className = `response ${type}`;
+        }
+    }
+
+    function appendWsMessage(prefix, data) {
+        const box = document.getElementById('ws-messages');
+        if (!box) return;
+        const ts = new Date().toLocaleTimeString();
+        const msg = `[${ts}] ${prefix}: ${data}\n`;
+        box.textContent += msg;
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function connectWS() {
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+            addLog('WebSocket 已连接，无需重复连接', 'info');
+            return;
+        }
+        const url = getWsUrl();
+        addLog(`尝试连接 WebSocket: ${url}`, 'info');
+        try {
+            wsClient = new WebSocket(url);
+        } catch (e) {
+            updateWsStatus(`连接错误: ${e.message}`, 'error');
+            addLog(`WebSocket 连接异常: ${e.message}`, 'error');
+            return;
+        }
+        wsClient.onopen = () => {
+            updateWsStatus(`已连接: ${url}`, 'success');
+            showResponse('ws-response', `连接成功: ${url}`, 'success');
+            addLog('WebSocket 握手完成，连接已打开', 'success');
+        };
+        wsClient.onmessage = (ev) => {
+            const data = typeof ev.data === 'string' ? ev.data : '[Binary] ' + (ev.data?.size || '');
+            appendWsMessage('收到', data);
+        };
+        wsClient.onerror = (ev) => {
+            updateWsStatus('连接错误', 'error');
+            addLog('WebSocket 发生错误', 'error');
+        };
+        wsClient.onclose = (ev) => {
+            updateWsStatus(`已断开 (code=${ev.code})`, 'info');
+            addLog(`WebSocket 已关闭 (code=${ev.code})`, 'info');
+        };
+    }
+
+    function disconnectWS() {
+        if (wsClient) {
+            wsClient.close(1000, 'client requested');
+        } else {
+            addLog('WebSocket 尚未连接', 'info');
+        }
+    }
+
+    function sendWsText() {
+        const text = document.getElementById('wsMsgInput')?.value || '';
+        if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+            showResponse('ws-response', '请先连接 WebSocket', 'error');
+            return;
+        }
+        wsClient.send(text);
+        appendWsMessage('发送', text);
+        showResponse('ws-response', `已发送文本 (${text.length}字节)`, 'success');
+    }
+
+    function sendWsBinary() {
+        if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+            showResponse('ws-response', '请先连接 WebSocket', 'error');
+            return;
+        }
+        const bytes = new Uint8Array([1,2,3,4,5,6,7,8,9,0]);
+        wsClient.send(bytes);
+        appendWsMessage('发送', '[Binary] ' + bytes.length + ' bytes');
+        showResponse('ws-response', `已发送二进制 (${bytes.length}字节)`, 'success');
+    }
+
+    function sendWsPing() {
+        if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+            showResponse('ws-response', '请先连接 WebSocket', 'error');
+            return;
+        }
+
+        const pingData = 'ping-' + Date.now();
+        const startTime = Date.now();
+
+        // 监听pong响应
+        const pongHandler = (event) => {
+            const endTime = Date.now();
+            const latency = endTime - startTime;
+            appendWsMessage('收到 Pong', `延迟: ${latency}ms, 数据: ${event.data}`);
+            showResponse('ws-response', `Ping-Pong 完成 (延迟: ${latency}ms)`, 'success');
+
+            // 移除事件监听器
+            wsClient.removeEventListener('message', pongHandler);
+        };
+
+        wsClient.addEventListener('message', pongHandler);
+
+        // 发送ping
+        wsClient.send(pingData);
+        appendWsMessage('发送 Ping', pingData);
+        showResponse('ws-response', `已发送 Ping (等待 Pong 响应...)`, 'info');
+
+        // 设置超时（5秒）
+        setTimeout(() => {
+            wsClient.removeEventListener('message', pongHandler);
+            if (wsClient.readyState === WebSocket.OPEN) {
+                showResponse('ws-response', 'Ping 超时 (5秒内未收到 Pong)', 'error');
+                appendWsMessage('超时', 'Ping 请求超时');
+            }
+        }, 5000);
+    }
+
+    function closeWs() {
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+            wsClient.close(1000, 'client close');
+        }
+    }
+
+    function clearWsMessages() {
+        const box = document.getElementById('ws-messages');
+        if (box) box.textContent = '';
+    }
+</script>
 </body>
 </html>

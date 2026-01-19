@@ -35,10 +35,10 @@
    , buffer = <<>> :: binary()                                      %% 缓存接收到的数据
    , wsReq :: undefined | #wsReq{}                                  %% 解析后的http
    , headerCnt = 0 :: pos_integer()                                 %% header计数
-   , temHeader = [] :: [wsHeaders()]                                  %% 解析header临时数据
+   , temHeader = [] :: [wsHeaders()]                                %% 解析header临时数据
    , contentLength :: undefined | non_neg_integer() | chunked       %% 长度
    , temChunked = <<>> :: binary()                                  %% chunked 模式下保存数据
-   , method :: wsMethod()                                             %% 请求的method
+   , method :: wsMethod()                                           %% 请求的method
    , path :: binary()                                               %% 请求的URL
    , rn :: undefined | binary:cp()                                  %% binary:cp()
    , socket :: undefined | inet:socket() | ssl:sslsocket()          %% 连接的socket
@@ -47,10 +47,11 @@
    , maxSize = infinity :: pos_integer()                            %% 单次允许接收的最大长度
    , chunkedSupp = false :: boolean()                               %% 是否运行 chunked
 
-	, fragmented = false :: boolean()     									  %% websocket
-	, fragmentedOpcode :: integer()											  %% websocket 操作码
-	, fragmentedBuffer = <<>> :: binary()                            %% websocket 中间缓存数据
-	, webState :: term()															  %% websocket链接状态数据
+   , is_behavior = false :: boolean()                         %% 是否是行为连接
+   , fragmented = false :: boolean()                                %% websocket
+   , fragmentedOpcode :: integer()                                  %% websocket 操作码
+   , fragmentedBuffer = <<>> :: binary()                            %% websocket 中间缓存数据
+   , webState :: term()                                             %% websocket链接状态数据
 }).
 
 %% WebSocket握手常量

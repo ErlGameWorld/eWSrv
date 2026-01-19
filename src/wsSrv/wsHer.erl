@@ -3,7 +3,8 @@
 -include("eWSrv.hrl").
 
 -export_type([
-	response/0
+   response/0
+   , wsResponse/0
 ]).
 
 -type response() ::
@@ -21,13 +22,32 @@
 -type wsResponse() ::
 {ok, WsOpCode :: wsOpCode(), Data :: binary(), WebState :: term()} |
 {ok, WebState :: term()}.
--callback handleMsg(WsOpCode :: wsOpCode(), Data :: binary(), WebState :: term()) -> wsResponse().
+-callback handleWs(WsOpCode :: wsOpCode(), Data :: binary(), WebState :: term()) -> wsResponse().
 
-%% 升级之后调用 可以其他玩家进程之类的
--callback onWsUpgrade(wsReq()) -> term().
+-callback init(Args :: term()) -> {ok, State :: term()} |{stop, Reason :: term()}.
+-callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
+   kpS |
+   {reply, Reply :: term()} |
+   {reply, Reply :: term(), NewState :: term()} |
+   {noreply, NewState :: term()} |
+   {mayReply, Reply :: term()} |
+   {mayReply, Reply :: term(), NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()} |
+   {stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
+
+-callback handleCast(Request :: term(), State :: term()) ->
+   kpS |
+   {noreply, NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()}.
+
+-callback handleInfo(Info :: timeout | term(), State :: term()) ->
+   kpS |
+   {noreply, NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()}.
+
 %% 支持的WebSocket协议
 -callback supportedProtocols() -> [binary()].
 %% 支持的WebSocket扩展
 -callback supportedExtensions() -> [binary()].
 
--optional_callbacks([onWsUpgrade/1, handleMsg/3, supportedProtocols/0, supportedExtensions/0]).
+-optional_callbacks([init/1, handleCall/3, handleCast/2, handleInfo/2, handleWs/3, supportedProtocols/0, supportedExtensions/0]).
