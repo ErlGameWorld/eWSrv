@@ -104,55 +104,69 @@ processFrames([], State) -> {ok, State};
 processFrames([{Fin, Opcode, Payload} | Rest], #wsState{socket = Socket, wsMod = WsMod, webState = WebState, fragmented = Fragmented, fragmentedOpcode = FragOpcode, fragmentedBuffer = FragBuffer} = State) ->
    case Opcode of
       ?WsOpCF ->
-         MewState = if
+         if
             Fragmented ->
                NewBuffer = <<FragBuffer/binary, Payload/binary>>,
                if
                   Fin =:= 1 ->
-                     {ok, NewWebState} = doHandleWs(FragOpcode, NewBuffer, WebState, WsMod, Socket),
-                     State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState};
+                     case doHandleWs(FragOpcode, NewBuffer, WebState, WsMod, Socket) of
+                        {ok, NewWebState} ->
+                           processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+                        {close, Reason, NewWebState} ->
+                           {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+                     end;
                   true ->
-                     State#wsState{fragmentedBuffer = NewBuffer}
+                     processFrames(Rest, State#wsState{fragmentedBuffer = NewBuffer})
                end;
             true ->
                ?wsErr("Received continuation frame without prior fragmented frame~n"),
-               State
-         end,
-         processFrames(Rest, MewState);
+               processFrames(Rest, State)
+         end;
       ?WsOpText ->
-         MewState = if
+         if
             Fin =:= 1 ->
-               {ok, NewWebState} = doHandleWs(Opcode, Payload, WebState, WsMod, Socket),
-               State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState};
+               case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
+                  {ok, NewWebState} ->
+                     processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+                  {close, Reason, NewWebState} ->
+                     {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+               end;
             true ->
-               State#wsState{fragmented = true, fragmentedOpcode = ?WsOpText, fragmentedBuffer = Payload}
-         end,
-         processFrames(Rest, MewState);
+               processFrames(Rest, State#wsState{fragmented = true, fragmentedOpcode = ?WsOpText, fragmentedBuffer = Payload})
+         end;
       ?WsOpBinary ->
-         MewState = if
+         if
             Fin =:= 1 ->
-               {ok, NewWebState} = doHandleWs(Opcode, Payload, WebState, WsMod, Socket),
-               State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState};
+               case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
+                  {ok, NewWebState} ->
+                     processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+                  {close, Reason, NewWebState} ->
+                     {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+               end;
             true ->
-               State#wsState{fragmented = true, fragmentedOpcode = ?WsOpBinary, fragmentedBuffer = Payload}
-         end,
-         processFrames(Rest, MewState);
+               processFrames(Rest, State#wsState{fragmented = true, fragmentedOpcode = ?WsOpBinary, fragmentedBuffer = Payload})
+         end;
       ?WsOpClose ->
          case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
             {ok, NewWebState} ->
-               MewState = State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState},
-               processFrames(Rest, MewState);
-            {close, NewWebState} ->
-               {close, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+            {close, Reason, NewWebState} ->
+               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
          end;
       ?WsOpPing ->
-         {ok, NewWebState} = doHandleWs(Opcode, Payload, WebState, WsMod, Socket),
-         MewState = State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState},
-         processFrames(Rest, MewState);
+         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
+            {ok, NewWebState} ->
+               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+            {close, Reason, NewWebState} ->
+               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+         end;
       ?WsOpPong ->
-         {ok, NewWebState} = doHandleWs(Opcode, Payload, WebState, WsMod, Socket),
-         MewState = State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState},
-         processFrames(Rest, MewState);
+         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
+            {ok, NewWebState} ->
+               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
+            {close, Reason, NewWebState} ->
+               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+         end;
       _ ->
          ?wsErr("Unknown WebSocket opcode: ~p~n", [Opcode]),
          processFrames(Rest, State)
@@ -169,7 +183,11 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
          sendFrame(Socket, ROpCode, RetBody),
          {ok, NWebState};
       {close, NWebState} ->
-         {close, NWebState};
+         {close, normal, NWebState};
+      {close, Reason, NWebState} ->
+         {close, Reason, NWebState};
+      {stop, Reason, NWebState} ->
+         {close, Reason, NWebState};
       %% Unexpected
       Unexpected ->
          ?wsErr("handleWs return error FragOpcode:~p WebState:~p Unexpected:~p Payload:~p ~n", [FragOpcode, WebState, Unexpected, Payload]),
@@ -181,7 +199,11 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
       throw:{ok, NWebState} ->
          {ok, NWebState};
       throw:{close, NWebState} ->
-         {close, NWebState};
+         {close, normal, NWebState};
+      throw:{close, Reason, NWebState} ->
+         {close, Reason, NWebState};
+      throw:{stop, Reason, NWebState} ->
+         {close, Reason, NWebState};
       throw:Exc:Stacktrace ->
          ?wsErr("handleWs catch throw FragOpcode:~p WebState:~p Payload:~p throw:~p S:~p~n", [FragOpcode, WebState, Payload, Exc, Stacktrace]),
          {ok, WebState};

@@ -223,6 +223,8 @@ handleMsg({tcp, _Socket, Data}, State) ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
+      {close, Reason, _NewState} ->
+         {stop, Reason};
       Err ->
          case Err of
             {err_code, Code} ->
@@ -273,6 +275,8 @@ handleMsg({ssl, _Socket, Data}, State) ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
+      {close, Reason, _NewState} ->
+         {stop, Reason};
       Err ->
          case Err of
             {err_code, Code} ->
@@ -322,7 +326,7 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
 
 terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, is_behavior = IsBehavior} = _State) ->
    IsBehavior andalso WsMod:terminate(Reason, WebState),
-   wsNet:close(Socket),
+   catch wsNet:close(Socket),
    exit(Reason).
 
 newWsState(WsState) ->
@@ -390,10 +394,15 @@ doResponse({response, Code, UserHeaders, Body}, Socket, TemHeader, Method) ->
 doResponse({chunk, UserHeaders, Initial}, Socket, TemHeader, Method) ->
    ResponseHeaders = [transferEncoding(UserHeaders), connection(UserHeaders, TemHeader) | UserHeaders],
    sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
-   Initial =:= <<"">> orelse sendChunk(Socket, Initial),
-   case startChunkLoop(Socket) of
-      {error, client_closed} -> client;
-      ok -> server
+   case Method of
+      'HEAD' ->
+         ok;
+      _ ->
+         Initial =:= <<"">> orelse sendChunk(Socket, Initial),
+         case startChunkLoop(Socket) of
+            {error, client_closed} -> client;
+            ok -> server
+         end
    end,
    closeOrKeepAlive(UserHeaders, TemHeader);
 %% WebSocket升级响应
