@@ -326,7 +326,9 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
 
 terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, is_behavior = IsBehavior} = _State) ->
    IsBehavior andalso WsMod:terminate(Reason, WebState),
-   catch wsNet:close(Socket),
+   try wsNet:close(Socket)
+   catch _:_ -> ok
+   end,
    exit(Reason).
 
 newWsState(WsState) ->
