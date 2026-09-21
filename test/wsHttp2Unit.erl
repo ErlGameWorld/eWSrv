@@ -825,3 +825,51 @@ ping_size_validation_regression_test() ->
    ?assertEqual({ok, <<"12345678">>},
       wsHttp2Frame:pingData(<<"12345678">>)),
    ?assertEqual({error, badPing}, wsHttp2Frame:pingData(<<"short">>)).
+
+
+http2_respects_peer_header_list_limit_test_() ->
+   {timeout, 20, fun respectsPeerHeaderLimit/0}.
+
+respectsPeerHeaderLimit() ->
+   {ok, _} = application:ensure_all_started(eWSrv),
+   Name = ws_http2_peer_header_limit_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {ok, _} = eWSrv:openSrv(Name, 0, [
+         {http2, true}, {wsMod, wsHttp2TestHandler}
+      ]),
+      ListenerName = ntCom:lsName(tcp, Name),
+      Port = ntTcpListener:getListenPort(ListenerName),
+      {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port,
+         [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
+
+      %% Advertise a deliberately tiny response field-section limit.
+      ok = gen_tcp:send(Sock, [
+         ?PREFACE,
+         wsHttp2Frame:settingsFrame([{max_header_list_size, 64}])
+      ]),
+      {Parser1, _ServerFrames} = recvUntil(
+         fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+
+      Headers = [
+         {<<":method">>, <<"GET">>},
+         {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>},
+         {<<":path">>, <<"/one">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock,
+         wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, internal_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
