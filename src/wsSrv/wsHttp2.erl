@@ -36,6 +36,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       header_frames => none,
       last_client_stream => 0,
       need_client_settings => true,
+      expect_settings_ack => false,
       peer_max_frame => ?DEFAULT_MAX_FRAME,
       peer_initial_window => ?DEFAULT_WINDOW,
       peer_max_concurrent => infinity,
@@ -59,7 +60,7 @@ start(State) ->
       {max_header_list_size, maps:get(max_header, State)}
    ],
    case wsNet:send(maps:get(socket, State), wsHttp2Frame:settingsFrame(Settings)) of
-      ok -> {ok, State};
+      ok -> {ok, State#{expect_settings_ack => true}};
       {error, Reason} -> {error, Reason}
    end.
 
@@ -109,11 +110,18 @@ applyFrames([{frame, Type, Flags, StreamId, Payload} = Frame | Rest], State0) ->
                   {ok, State1} -> dispatch(Type, Flags, StreamId, Payload, Rest, State1);
                   {error, Reason} -> connError(protocol_error, Reason, State0)
                end;
+            {error, frame_size_error, Reason} when Type =:= priority, StreamId =/= 0 ->
+               State1 = streamError(StreamId, frame_size_error, State0),
+               ?wsWarn("HTTP/2 PRIORITY frame size error stream=~p reason=~p", [StreamId, Reason]),
+               applyFrames(Rest, State1);
             {error, Code, Reason} ->
                connError(Code, Reason, State0)
          end;
       {StreamId, _Kind, _EndStream, _Acc, _Size} when Type =:= continuation ->
-         applyContinuation(Flags, StreamId, Payload, Rest, State0);
+         case validateFrame(continuation, Flags, StreamId, Payload) of
+            ok -> applyContinuation(Flags, StreamId, Payload, Rest, State0);
+            {error, Code, Reason} -> connError(Code, Reason, State0)
+         end;
       {_PendingStream, _Kind, _EndStream, _Acc, _Size} ->
          connError(protocol_error, expected_continuation, State0)
    end.
@@ -172,8 +180,9 @@ validateStreamId(_Type, _StreamId, _Payload) ->
 dispatch(settings, Flags, 0, Payload, Rest, State) ->
    case Flags band ?ACK of
       ?ACK ->
-         case Payload of
-            <<>> -> applyFrames(Rest, State);
+         case {Payload, maps:get(expect_settings_ack, State, false)} of
+            {<<>>, true} -> applyFrames(Rest, State#{expect_settings_ack => false});
+            {<<>>, false} -> connError(protocol_error, unexpected_settings_ack, State);
             _ -> connError(frame_size_error, settings_ack_payload, State)
          end;
       _ ->
@@ -202,6 +211,56 @@ dispatch(ping, Flags, 0, Payload, Rest, State) ->
          end
    end;
 dispatch(window_update, _Flags, StreamId, Payload, Rest, State) ->
+   case {StreamId, streamState(StreamId, State)} of
+      {0, _} ->
+         applyWindowUpdateFrame(StreamId, Payload, Rest, State);
+      {_Id, idle} ->
+         connError(protocol_error, {window_update_on_idle_stream, StreamId}, State);
+      {_Id, closed} ->
+         %% WINDOW_UPDATE can legitimately race with END_STREAM/RST_STREAM.
+         applyFrames(Rest, State);
+      {_Id, open} ->
+         applyWindowUpdateFrame(StreamId, Payload, Rest, State)
+   end;
+
+dispatch(headers, Flags, StreamId, Payload, Rest, State) ->
+   applyHeaders(Flags, StreamId, Payload, Rest, State);
+dispatch(continuation, _Flags, _StreamId, _Payload, _Rest, State) ->
+   connError(protocol_error, unexpected_continuation, State);
+dispatch(data, Flags, StreamId, Payload, Rest, State) ->
+   applyData(Flags, StreamId, Payload, Rest, State);
+dispatch(rst_stream, _Flags, StreamId, _Payload, Rest, State) ->
+   case streamState(StreamId, State) of
+      idle ->
+         connError(protocol_error, {rst_stream_on_idle, StreamId}, State);
+      _ ->
+         applyFrames(Rest, dropStream(StreamId, State))
+   end;
+dispatch(priority, _Flags, StreamId, Payload, Rest, State) ->
+   case wsHttp2Frame:priorityFields(Payload) of
+      {ok, _Exclusive, StreamId, _Weight, _} ->
+         State1 = streamError(StreamId, protocol_error, State),
+         applyFrames(Rest, State1);
+      {ok, _Exclusive, _Dep, _Weight, <<>>} ->
+         applyFrames(Rest, State);
+      _ ->
+         %% Length errors are handled by validateFrame/4 before dispatch.
+         applyFrames(Rest, State)
+   end;
+dispatch(push_promise, _Flags, _StreamId, _Payload, _Rest, State) ->
+   %% Clients cannot send PUSH_PROMISE.
+   connError(protocol_error, client_push_promise, State);
+dispatch(goaway, _Flags, 0, Payload, _Rest, State) ->
+   case wsHttp2Frame:goawayFields(Payload) of
+      {ok, _Last, Code, _Debug} -> {stop, {peer_goaway, Code}, State#{goaway => true}};
+      {error, Reason} -> connError(frame_size_error, Reason, State)
+   end;
+dispatch({unknown, _}, _Flags, _StreamId, _Payload, Rest, State) ->
+   applyFrames(Rest, State);
+dispatch(_Other, _Flags, _StreamId, _Payload, Rest, State) ->
+   applyFrames(Rest, State).
+
+applyWindowUpdateFrame(StreamId, Payload, Rest, State) ->
    case wsHttp2Frame:windowUpdateIncrement(Payload) of
       {ok, Inc} ->
          case applyWindowUpdate(StreamId, Inc, State) of
@@ -216,36 +275,22 @@ dispatch(window_update, _Flags, StreamId, Payload, Rest, State) ->
          applyFrames(Rest, State1);
       {error, Reason} ->
          connError(frame_size_error, Reason, State)
-   end;
-dispatch(headers, Flags, StreamId, Payload, Rest, State) ->
-   applyHeaders(Flags, StreamId, Payload, Rest, State);
-dispatch(continuation, _Flags, _StreamId, _Payload, _Rest, State) ->
-   connError(protocol_error, unexpected_continuation, State);
-dispatch(data, Flags, StreamId, Payload, Rest, State) ->
-   applyData(Flags, StreamId, Payload, Rest, State);
-dispatch(rst_stream, _Flags, StreamId, _Payload, Rest, State) ->
-   applyFrames(Rest, dropStream(StreamId, State));
-dispatch(priority, _Flags, StreamId, Payload, Rest, State) ->
-   case wsHttp2Frame:priorityFields(Payload) of
-      {ok, _Exclusive, StreamId, _Weight, _} ->
-         connError(protocol_error, priority_self_dependency, State);
-      {ok, _Exclusive, _Dep, _Weight, <<>>} ->
-         applyFrames(Rest, State);
-      _ ->
-         connError(frame_size_error, bad_priority, State)
-   end;
-dispatch(push_promise, _Flags, _StreamId, _Payload, _Rest, State) ->
-   %% Clients cannot send PUSH_PROMISE.
-   connError(protocol_error, client_push_promise, State);
-dispatch(goaway, _Flags, 0, Payload, _Rest, State) ->
-   case wsHttp2Frame:goawayFields(Payload) of
-      {ok, _Last, Code, _Debug} -> {stop, {peer_goaway, Code}, State#{goaway => true}};
-      {error, Reason} -> connError(frame_size_error, Reason, State)
-   end;
-dispatch({unknown, _}, _Flags, _StreamId, _Payload, Rest, State) ->
-   applyFrames(Rest, State);
-dispatch(_Other, _Flags, _StreamId, _Payload, Rest, State) ->
-   applyFrames(Rest, State).
+   end.
+
+streamState(0, _State) ->
+   connection;
+streamState(StreamId, State) ->
+   case maps:is_key(StreamId, maps:get(streams, State)) of
+      true ->
+         open;
+      false ->
+         Last = maps:get(last_client_stream, State, 0),
+         case StreamId band 1 of
+            0 -> idle;  %% Server push is not implemented; no even stream can exist.
+            1 when StreamId =< Last -> closed;
+            1 -> idle
+         end
+   end.
 
 applyPeerSettings(Settings, State0) ->
    case validateSettings(Settings) of
