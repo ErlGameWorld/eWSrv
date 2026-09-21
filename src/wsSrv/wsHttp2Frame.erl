@@ -161,8 +161,8 @@ rstStreamFrame(StreamId, ErrorCode) ->
 
 %% @doc 把一个 HPACK header 块切成 HEADERS + 若干 CONTINUATION frame，
 %% 每帧负载不超过 `MaxFrame'，且只有最后一帧带 END_HEADERS。
-%% 分帧的目的是不让单个 stream 独占连接：header 块中间可以插入别的
-%% stream 的 frame，保证多路复用不被大头部阻塞。
+%% 注意：RFC 9113 要求一个 header block 的 HEADERS + CONTINUATION 必须
+%% 连续发送，中间不能插入任何其它 stream 的 frame。
 %% @param HeaderBlock 已 HPACK 编码的 header 块
 %% @param MaxFrame 对端通告的 SETTINGS_MAX_FRAME_SIZE
 %% @returns 可直接发送的 iolist
