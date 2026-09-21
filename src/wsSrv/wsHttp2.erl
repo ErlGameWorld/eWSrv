@@ -380,38 +380,56 @@ applyHeaders(Flags, StreamId, Payload, Rest, State0) ->
          EndStream = Flags band ?END_STREAM =/= 0,
          EndHeaders = Flags band ?END_HEADERS =/= 0,
          case classifyHeaders(StreamId, State0) of
-            {error, Reason} ->
+            {connection_error, Reason} ->
                connError(protocol_error, Reason, State0);
             Kind ->
+               %% A valid HEADERS frame opens a new peer stream immediately.
+               %% Advance the high-water mark even if request validation later
+               %% rejects the stream, so identifiers can never be reused.
+               State1 = case Kind of
+                  initial -> State0#{last_client_stream => StreamId};
+                  {reject_new, _} -> State0#{last_client_stream => StreamId};
+                  _ -> State0
+               end,
                Size = byte_size(Block),
-               case Size > maps:get(max_header, State0) of
+               case Size > maps:get(max_header, State1) of
                   true ->
-                     State1 = streamError(StreamId, enhance_your_calm, State0),
-                     applyFrames(Rest, State1);
+                     %% Closing the connection is intentional here: skipping an
+                     %% oversized HPACK block and continuing would desynchronize
+                     %% the connection-wide dynamic table.
+                     connError(enhance_your_calm, header_block_too_large, State1);
                   false when EndHeaders ->
-                     finishHeaderBlock(StreamId, Kind, EndStream, Block, Rest, State0);
+                     finishHeaderBlock(StreamId, Kind, EndStream, Block, Rest, State1);
                   false ->
-                     State1 = State0#{header_frames => {StreamId, Kind, EndStream, [Block], Size}},
-                     applyFrames(Rest, State1)
+                     State2 = State1#{header_frames => {StreamId, Kind, EndStream, [Block], Size}},
+                     applyFrames(Rest, State2)
                end
          end
    end.
 
 classifyHeaders(StreamId, State) ->
    Streams = maps:get(streams, State),
-   case maps:is_key(StreamId, Streams) of
-      true -> trailer;
-      false ->
+   case maps:get(StreamId, Streams, undefined) of
+      #{remote_closed := true} ->
+         {reject, stream_closed};
+      Stream when is_map(Stream) ->
+         trailer;
+      undefined ->
          Last = maps:get(last_client_stream, State),
          case {StreamId band 1, StreamId > Last, maps:get(goaway, State, false)} of
             {1, true, false} ->
                case map_size(Streams) < maps:get(max_concurrent_streams, State) of
                   true -> initial;
-                  false -> {error, too_many_streams}
+                  false -> {reject_new, refused_stream}
                end;
-            {0, _, _} -> {error, client_stream_must_be_odd};
-            {1, false, _} -> {error, reused_or_out_of_order_stream};
-            {_, _, true} -> {error, stream_after_goaway}
+            {0, _, _} ->
+               {connection_error, client_stream_must_be_odd};
+            {1, false, _} ->
+               %% All lower peer stream IDs are already in the closed state
+               %% (opened earlier or implicitly skipped by a higher ID).
+               discard_closed;
+            {_, _, true} ->
+               {connection_error, stream_after_goaway}
          end
    end.
 
@@ -420,8 +438,10 @@ applyContinuation(Flags, StreamId, Payload, Rest,
    Size = Size0 + byte_size(Payload),
    case Size > maps:get(max_header, State0) of
       true ->
-         State1 = streamError(StreamId, enhance_your_calm, State0#{header_frames => none}),
-         applyFrames(Rest, State1);
+         %% We cannot skip the rest of a HPACK field block and keep using the
+         %% connection: the dynamic table might be modified by skipped bytes.
+         connError(enhance_your_calm, header_block_too_large,
+            State0#{header_frames => none});
       false ->
          EndHeaders = Flags band ?END_HEADERS =/= 0,
          case EndHeaders of
@@ -449,8 +469,19 @@ finishHeaderBlock(StreamId, Kind, EndStream, Block, Rest, State0) ->
                applyFrames(Rest, State2);
             false ->
                case Kind of
-                  initial -> finishInitialHeaders(StreamId, EndStream, Headers, Rest, State1);
-                  trailer -> finishTrailers(StreamId, EndStream, Headers, Rest, State1)
+                  initial ->
+                     finishInitialHeaders(StreamId, EndStream, Headers, Rest, State1);
+                  trailer ->
+                     finishTrailers(StreamId, EndStream, Headers, Rest, State1);
+                  {reject_new, Code} ->
+                     State2 = streamError(StreamId, Code, State1),
+                     applyFrames(Rest, State2);
+                  {reject, Code} ->
+                     State2 = streamError(StreamId, Code, State1),
+                     applyFrames(Rest, State2);
+                  discard_closed ->
+                     %% HPACK state was advanced above; payload semantics are discarded.
+                     applyFrames(Rest, State1)
                end
          end
    end.
