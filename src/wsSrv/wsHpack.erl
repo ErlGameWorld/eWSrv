@@ -73,7 +73,7 @@ setMax(Max, Ctx = #ctx{dyn = Dyn, size = Size}) when is_integer(Max), Max >= 0, 
 %% @doc 编码一个头部列表，返回线路字节与推进后的上下文。
 %% 头部名必须为小写；伪头部（pseudo-header）必须排在普通头部之前
 %% （这是调用方的责任，依据 RFC 9113）。
--spec encode(wcHeaders:headers(), ctx()) -> {iodata(), ctx()}.
+-spec encode([{binary(), binary()}], ctx()) -> {iodata(), ctx()}.
 encode(Headers, Ctx0) ->
 	{Su, Ctx1} = sizeUpdatePrefix(Ctx0),
 	%% 归一化与编码融合成一趟：早先先 comprehension 出一份中间列表，
@@ -90,10 +90,16 @@ sizeUpdatePrefix(Ctx = #ctx{max = Max, sentMax = Max}) ->
 sizeUpdatePrefix(Ctx = #ctx{max = Max}) ->
 	{[prefixByte(5, 1, Max)], Ctx#ctx{sentMax = Max}}.
 
-entry({Name, Value}) -> {lower(Name), wcUtil:toBinary(Value)};
+entry({Name, Value}) -> {lower(Name), toBinary(Value)};
 entry(Name) when is_binary(Name) -> {lower(Name), <<>>}.
 
-lower(Bin) -> wcUtil:toLower(Bin).
+lower(Bin) -> wsUtil:toLowerStr(Bin).
+
+toBinary(V) when is_binary(V) -> V;
+toBinary(V) when is_integer(V) -> integer_to_binary(V);
+toBinary(V) when is_atom(V) -> atom_to_binary(V, utf8);
+toBinary(V) when is_list(V) -> iolist_to_binary(V).
+
 
 encodeOne({Name, Value}, Ctx) ->
 	case sensitive(Name) of
@@ -220,7 +226,7 @@ evictOldest(OldestFirst, Size, _Max) ->
 
 %% @doc 解码一个完整的头部块片段。CONTINUATION 帧必须先由调用方拼接
 %% 到一起再传入。
--spec decode(binary(), ctx()) -> {ok, wcHeaders:headers(), ctx()} | {error, term()}.
+-spec decode(binary(), ctx()) -> {ok, [{binary(), binary()}], ctx()} | {error, term()}.
 decode(Bin, Ctx) ->
 	%% AllowSizeUpdate=true：RFC 7541 §4.2 要求 dynamic table size update
 	%% 只能出现在头部块开头（连续多个 size update 亦可）。
