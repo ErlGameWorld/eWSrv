@@ -266,6 +266,34 @@ multiplex() ->
    end.
 
 
+
+http2_compression_integration_test_() ->
+   {timeout, 20, fun compression/0}.
+
+compression() ->
+   Name = ws_http2_compress_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
+      Headers = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/compressed">>},
+         {<<"accept-encoding">>, <<"gzip;q=1, deflate;q=0.5">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, EncodedBody} = decodeResponse(Frames),
+      ?assertEqual(<<"gzip">>, proplists:get_value(<<"content-encoding">>, RespHeaders)),
+      ?assertEqual(<<"Accept-Encoding">>,
+         proplists:get_value(<<"vary">>, RespHeaders)),
+      Body = zlib:gunzip(EncodedBody),
+      ?assertEqual(binary:copy(<<"Hello World!">>, 86), Body),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_slow_stream_does_not_block_fast_stream_test_() ->
    {timeout, 20, fun slowDoesNotBlockFast/0}.
 
