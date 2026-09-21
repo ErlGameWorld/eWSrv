@@ -579,7 +579,7 @@ dispatchRequest(StreamId, State0) ->
    end,
    Req = Req0#wsReq{body = Body},
    Response = callHandler(maps:get(ws_mod, State0), Req#wsReq.method, Req#wsReq.path, Req),
-   sendHandlerResponse(StreamId, Response, Req#wsReq.method, State0).
+   sendHandlerResponse(StreamId, Response, Req, State0).
 
 callHandler(WsMod, Method, Path, Req) ->
    try WsMod:handle(Method, Path, Req) of
@@ -610,7 +610,8 @@ callHandler(WsMod, Method, Path, Req) ->
          {response, 500, [], <<"Internal server error">>}
    end.
 
-sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Method, State) ->
+sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Req, State) ->
+   Method = Req#wsReq.method,
    case file:read_file(Filename) of
       {ok, Data0} ->
          case normalizeFileRange(Data0, Range) of
@@ -622,7 +623,10 @@ sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Method, St
       {error, _} ->
          sendResponse(StreamId, 500, [], <<"Internal server error">>, Method, State)
    end;
-sendHandlerResponse(StreamId, {response, Code, Headers, Body}, Method, State) ->
+sendHandlerResponse(StreamId, {response, Code, Headers0, Body0}, Req, State) ->
+   Method = Req#wsReq.method,
+   {Body, Headers} = wsHttp:tryCompressResponse(
+      Body0, Headers0, Req#wsReq.headers, Code, Method),
    sendResponse(StreamId, Code, Headers, Body, Method, State).
 
 statusOr(Code, 200) -> Code;
