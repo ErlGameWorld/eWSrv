@@ -6,6 +6,14 @@
 -define(END_STREAM, 16#01).
 -define(END_HEADERS, 16#04).
 
+
+settings_last_duplicate_value_wins_test() ->
+   %% SETTINGS_INITIAL_WINDOW_SIZE(4) appears twice; RFC 9113 says last wins.
+   Payload = <<4:16, 1000:32, 4:16, 2000:32>>,
+   {ok, Settings} = wsHttp2Frame:settingsDecode(Payload),
+   ?assertEqual(2000, proplists:get_value(initial_window_size, Settings)),
+   ?assertEqual(1, length([V || {initial_window_size, V} <- Settings])).
+
 hpack_roundtrip_test() ->
    Headers = [
       {<<":method">>, <<"GET">>},
