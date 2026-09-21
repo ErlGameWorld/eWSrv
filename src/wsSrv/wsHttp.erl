@@ -299,6 +299,18 @@ handleMsg({tcp, _Socket, Data}, State0) ->
                {stop, Err}
          end
    end;
+handleMsg({h2_response, StreamId, WorkerPid, Req, Response},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({'DOWN', MonitorRef, process, _Pid, Reason},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleWorkerDown(MonitorRef, Reason, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, StopReason, NH2} -> {stop, StopReason, State#wsState{h2State = NH2}}
+   end;
 handleMsg({tcp_closed, _Socket}, _State) ->
    {stop, normal};
 handleMsg({tcp_error, _Socket, Reason}, _State) ->
