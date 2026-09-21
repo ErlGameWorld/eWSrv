@@ -914,9 +914,16 @@ normalizeResponseHeaders([], Acc) ->
    lists:reverse(Acc);
 normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
    Name = wsUtil:toLowerStr(toBinary(Name0)),
-   case isHopByHop(Name) of
-      true -> normalizeResponseHeaders(Rest, Acc);
-      false -> normalizeResponseHeaders(Rest, [{Name, toBinary(Value0)} | Acc])
+   Value = toBinary(Value0),
+   case {isHopByHop(Name), validMethod(Name), validHeaderValue(Value)} of
+      {true, _, _} ->
+         normalizeResponseHeaders(Rest, Acc);
+      {false, true, true} ->
+         normalizeResponseHeaders(Rest, [{Name, Value} | Acc]);
+      _ ->
+         %% Handler-generated malformed fields must never corrupt the H2 stream.
+         ?wsWarn("ignore invalid HTTP/2 response header name=~p", [Name]),
+         normalizeResponseHeaders(Rest, Acc)
    end.
 
 flushAllPending(State0) ->
