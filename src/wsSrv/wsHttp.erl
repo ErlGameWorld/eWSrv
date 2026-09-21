@@ -181,20 +181,49 @@ innerError(_CurState, Error, Class, Reason, Strace) ->
 %% ************************************************  API ***************************************************************
 init(Args) ->
    case Args of
-      {undefined, WsMod, MaxSize, ChunkedSupp} ->
-         {ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp, is_behavior = false}};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
-         case WsMod:init(Args) of
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage}} ->
+         case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp, is_behavior = true, webState = WebState}};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, true, WebState)};
+            {stop, Reason} ->
+               {stop, Reason}
+         end;
+      %% 兼容旧版eNet传入的4元组连接参数。
+      {undefined, WsMod, MaxSize, ChunkedSupp} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
+         case maybeInitHandler(WsMod, Args) of
+            {ok, WebState} ->
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end
    end.
 
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, IsBehavior, WebState) ->
+   #wsState{
+      wsMod = WsMod,
+      maxSize = MaxSize,
+      chunkedSupp = ChunkedSupp,
+      maxRequestLineSize = MaxReqLine,
+      maxHeaderSize = MaxHeader,
+      maxWsFrameSize = MaxWsFrame,
+      maxWsMessageSize = MaxWsMessage,
+      is_behavior = IsBehavior,
+      webState = WebState
+   }.
+
+maybeInitHandler(WsMod, Args) ->
+   case erlang:function_exported(WsMod, init, 1) of
+      true -> WsMod:init(Args);
+      false -> {ok, undefined}
+   end.
+
 handleMsg({tcp, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+   #wsState{stage = Stage, socket = Socket} = State,
+   case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
          #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method} = NewState,
@@ -214,7 +243,7 @@ handleMsg({tcp, _Socket, Data}, State) ->
                case NBuffer of
                   <<>> -> {ok, NewWsState};
                   _ ->
-                     handleMsg({tcp, Socket, NBuffer}, NewWsState)
+                     handleMsg({ssl, Socket, NBuffer}, NewWsState)
                end;
             close ->
                {stop, normal}
@@ -223,7 +252,8 @@ handleMsg({tcp, _Socket, Data}, State) ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
-      {close, Reason, _NewState} ->
+      {close, Reason, NewState} ->
+         maybeSendWsClose(NewState, Reason),
          {stop, Reason};
       Err ->
          case Err of
@@ -246,8 +276,8 @@ handleMsg({tcp_passive, Socket}, _State) ->
    kpS;
 
 handleMsg({ssl, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+   #wsState{stage = Stage, socket = Socket} = State,
+   case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
          #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method} = NewState,
@@ -275,7 +305,8 @@ handleMsg({ssl, _Socket, Data}, State) ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
-      {close, Reason, _NewState} ->
+      {close, Reason, NewState} ->
+         maybeSendWsClose(NewState, Reason),
          {stop, Reason};
       Err ->
          case Err of
@@ -302,7 +333,7 @@ handleMsg({?mSockReady, Socket}, State) ->
 handleMsg({?mSockReady, Socket, SslOpts, SslHSTet}, State) ->
    case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
       {ok, SslSock} ->
-         ssl:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
+         ssl:setopts(SslSock, [{packet, raw}, {active, ?ActionN}]),
          {ok, State#wsState{socket = SslSock, isSsl = true}};
       _Err ->
          ?wsErr("ssl handshake error ~p~n", [_Err]),
@@ -324,8 +355,25 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
          kpS
    end.
 
+maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
+   Code =
+      case Reason of
+         message_too_big -> 1009;
+         invalid_utf8 -> 1007;
+         _ -> 1002
+      end,
+   catch wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>),
+   ok;
+maybeSendWsClose(_State, _Reason) ->
+   ok.
+
 terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, is_behavior = IsBehavior} = _State) ->
-   IsBehavior andalso WsMod:terminate(Reason, WebState),
+   case IsBehavior andalso erlang:function_exported(WsMod, terminate, 2) of
+      true ->
+         try WsMod:terminate(Reason, WebState) catch _:_ -> ok end;
+      false ->
+         ok
+   end,
    try wsNet:close(Socket)
    catch _:_ -> ok
    end,
@@ -337,8 +385,13 @@ newWsState(WsState) ->
       , buffer = <<>>
       , wsReq = undefined
       , headerCnt = 0
+      , headerBytes = 0
+      , hostHeaderSeen = false
       , temHeader = []
       , contentLength = undefined
+      , bodyAcc = []
+      , bodySize = 0
+      , chunkState = size
       , temChunked = <<>>
    }.
 
@@ -421,10 +474,18 @@ doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader
          Ret =
             case wsUtil:normalizeRange(Range, Size) of
                undefined ->
-                  sendFile(Socket, ResponseCode, [{<<"Content-Length">>, Size} | ResponseHeaders], Filename, {0, 0});
+                  FileHeaders = [{<<"Content-Length">>, Size} | ResponseHeaders],
+                  case Method of
+                     'HEAD' -> sendResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
+                     _ -> sendFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
+                  end;
                {Offset, Length} ->
                   ERange = wsUtil:encodeRange({Offset, Length}, Size),
-                  sendFile(Socket, 206, lists:append(ResponseHeaders, [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange}]), Filename, {Offset, Length});
+                  FileHeaders = lists:append(ResponseHeaders, [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange}]),
+                  case Method of
+                     'HEAD' -> sendResponse(Socket, Method, 206, FileHeaders, <<>>);
+                     _ -> sendFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
+                  end;
                invalid_range ->
                   ERange = wsUtil:encodeRange(invalid_range, Size),
                   sendResponse(Socket, Method, 416, lists:append(ResponseHeaders, [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange}]), <<>>),
@@ -520,8 +581,8 @@ addVary(Hs) ->
 %% @doc Send a HTTP response to the client where the body is the
 %% contents of the given file. Assumes correctly set response code
 %% and headers.
--spec sendFile(Req, Code, Headers, Filename, Range) -> ok when
-   Req :: wsReq(),
+-spec sendFile(Socket, Code, Headers, Filename, Range) -> ok | {error, term()} when
+   Socket :: wsSocket(),
    Code :: wsHttpCode(),
    Headers :: wsHeaders(),
    Filename :: file:filename(),
@@ -579,6 +640,18 @@ chunkLoop(Socket) ->
    receive
       {tcp_closed, Socket} ->
          {error, client_closed};
+      {ssl_closed, Socket} ->
+         {error, client_closed};
+      {tcp_error, Socket, _Reason} ->
+         {error, client_closed};
+      {ssl_error, Socket, _Reason} ->
+         {error, client_closed};
+      {tcp_passive, Socket} ->
+         wsNet:setopts(Socket, [{active, ?ActionN}]),
+         ?MODULE:chunkLoop(Socket);
+      {ssl_passive, Socket} ->
+         wsNet:setopts(Socket, [{active, ?ActionN}]),
+         ?MODULE:chunkLoop(Socket);
       {chunk, close} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
@@ -619,15 +692,17 @@ sendChunk(Socket, Data) ->
    end.
 
 maybeSendContinue(Socket, Headers) ->
-   % According to RFC2616 section 8.2.3 an origin server must respond with
-   % either a "100 Continue" or a final response code when the client
-   % headers contains "Expect:100-continue"
-   case lists:keyfind(<<"Expect">>, 1, Headers) of
-      <<"100-continue">> ->
-         Response = httpResponse(100),
-         wsNet:send(Socket, Response);
-      _Other ->
-         ok
+   %% Expect字段名由decode_packet规范化为atom，值大小写不敏感。
+   case wsUtil:getHeader('Expect', Headers, undefined) of
+      undefined ->
+         ok;
+      Value ->
+         case wsUtil:toLowerStr(iolist_to_binary(Value)) of
+            <<"100-continue">> ->
+               wsNet:send(Socket, httpResponse(100));
+            _ ->
+               ok
+         end
    end.
 
 httpResponse(Code) ->
@@ -640,7 +715,7 @@ httpResponse(Code, Headers, Body) ->
    [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
 
 spellHeaders(Headers) ->
-   <<<<Key/binary, ": ", (toBinStr(Value))/binary, "\r\n">> || {Key, Value} <- Headers>>.
+   [[Key, <<": ">>, toBinStr(Value), <<"\r\n">>] || {Key, Value} <- Headers, Key =/= <<>>].
 
 -spec splitArgs(binary()) -> list({binary(), binary() | true}).
 splitArgs(<<>>) -> [];
