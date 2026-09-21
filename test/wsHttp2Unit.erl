@@ -209,6 +209,144 @@ continuationRequest() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+
+http2_authority_is_exposed_as_host_test_() ->
+   {timeout, 20, fun authorityAsHost/0}.
+
+authorityAsHost() ->
+   Name = ws_http2_host_compat_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
+      Headers = [
+         {<<":method">>, <<"GET">>},
+         {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"example.test:8080">>},
+         {<<":path">>, <<"/headers">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {_RespHeaders, Body} = decodeResponse(Frames),
+      ?assertNotEqual(nomatch, binary:match(Body, <<"Host: example.test:8080">>)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_invalid_method_is_stream_error_test_() ->
+   {timeout, 20, fun invalidMethod/0}.
+
+invalidMethod() ->
+   Name = ws_http2_bad_method_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      Headers = [
+         {<<":method">>, <<"BAD METHOD">>},
+         {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>},
+         {<<":path">>, <<"/one">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {Parser2, Frames1} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames1)),
+
+      %% The connection remains usable after the stream-local error.
+      H3 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/two">>}
+      ],
+      {B3, _} = wsHpack:encode(H3, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B3, 3, 16384, true)),
+      {_Parser3, Frames2} = recvUntil(fun(Fs) -> streamEnded(3, Fs) end,
+         Sock, Parser2, Frames1, 5000),
+      {HMap, BMap} = decodeResponses(Frames2),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(3, HMap))),
+      ?assertEqual(<<"two">>, maps:get(3, BMap)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_closed_stream_data_keeps_connection_alive_test_() ->
+   {timeout, 20, fun closedStreamData/0}.
+
+closedStreamData() ->
+   Name = ws_http2_closed_data_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H1 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/one">>}
+      ],
+      {B1, Tx1} = wsHpack:encode(H1, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B1, 1, 16384, true)),
+      {Parser2, Frames1} = recvUntil(fun(Fs) -> streamEnded(1, Fs) end,
+         Sock, Parser1, [], 5000),
+
+      %% Late DATA on a closed stream must consume/replenish connection credit,
+      %% cause a stream-local STREAM_CLOSED, and not kill the H2 connection.
+      ok = gen_tcp:send(Sock, wsHttp2Frame:frame(data, 1, <<"late">>, ?END_STREAM)),
+      IsClosedRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, stream_closed};
+         (_) -> false
+      end, Fs) end,
+      {Parser3, Frames2} = recvUntil(IsClosedRst, Sock, Parser2, Frames1, 5000),
+      ?assert(IsClosedRst(Frames2)),
+      ?assert(lists:any(fun
+         ({frame, window_update, _Flags, 0, _}) -> true;
+         (_) -> false
+      end, Frames2)),
+
+      H3 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/two">>}
+      ],
+      {B3, _Tx2} = wsHpack:encode(H3, Tx1),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B3, 3, 16384, true)),
+      {_Parser4, Frames3} = recvUntil(fun(Fs) -> streamEnded(3, Fs) end,
+         Sock, Parser3, Frames2, 5000),
+      {HMap, BMap} = decodeResponses(Frames3),
+      ?assertEqual(<<"two">>, maps:get(3, BMap)),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(3, HMap))),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_205_has_no_content_test_() ->
+   {timeout, 20, fun noContent205/0}.
+
+noContent205() ->
+   Name = ws_http2_205_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/reset-content">>}
+      ],
+      {B, _Tx} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"205">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<"0">>, proplists:get_value(<<"content-length">>, RespHeaders)),
+      ?assertEqual(<<>>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_post_data_integration_test_() ->
    {timeout, 20, fun postData/0}.
 
