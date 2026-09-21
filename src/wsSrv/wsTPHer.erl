@@ -7,10 +7,7 @@ init(_Args) ->
 	{ok, []}.
 
 handle(Method, Path, WsReq) ->
-	io:format("IMY************handle ~p ~p ~0p~n", [Method, Path, WsReq]),
-	Response = doHandle(Method, Path, WsReq),
-	io:format("IMY************Response ~0p~n", [Response]),
-	Response.
+	doHandle(Method, Path, WsReq).
 
 %% 主要的请求处理函数
 %% 主路由
@@ -419,10 +416,7 @@ format_rfc1123({{Y, M, D}, {H, Min, S}}) ->
 % 	wsendFrame(Socket, ?WsOpClose, <<1000, "Normal closure">>).
 
 handleWs(OpCode, Payload, WebState) ->
-	io:format("IMY***************websocket receive ~p ~ts ~n", [OpCode, Payload]),
-	Ret = doHandleWs(OpCode, Payload, WebState),
-	io:format("IMY***************websocket return ~p~n", [Ret]),
-	Ret.
+	doHandleWs(OpCode, Payload, WebState).
 
 %% @doc 处理WebSocket消息
 doHandleWs(?WsOpText, Message, WebState) ->
