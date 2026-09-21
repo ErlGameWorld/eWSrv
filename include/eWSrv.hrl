@@ -10,6 +10,7 @@ listenOpt() |                 %% eNet相关配置
 {maxHeaderSize, pos_integer()} |         %% 请求头总大小 默认64KB
 {maxWsFrameSize, pos_integer()} |        %% WebSocket单帧最大值 默认1MB
 {maxWsMessageSize, pos_integer()} |      %% WebSocket单消息最大值 默认8MB
+{http2, boolean()} |                     %% 是否启用HTTP/2（TLS ALPN + 明文prior knowledge）
 {chunkedSupp, boolean()}.                %% 服务器是否允许客户端发送Transfer-Encoding: chunked 默认false
 
 
@@ -40,13 +41,13 @@ listenOpt() |                 %% eNet相关配置
 ]).
 
 -type wsReq() :: #wsReq{}.
--type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'TRACE' | binary().
+-type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'CONNECT' | 'TRACE' | binary().
 -type wsBody() :: binary() | iolist().
 -type wsPath() :: binary().
 -type wsHeader() :: {Key :: atom(), Value :: binary() | string()}.
 -type wsHeaders() :: [wsHeader()].
 -type wsHttpCode() :: 100..999.
--type wsVersion() :: {0, 9} | {1, 0} | {1, 1}.
+-type wsVersion() :: {0, 9} | {1, 0} | {1, 1} | {2, 0}.
 -type wsSocket() :: inet:socket() | ssl:sslsocket().
 
 
