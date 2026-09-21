@@ -94,8 +94,16 @@ loop(Parent, State) ->
                terminate(Reason, NewState)
          end
    after loopTimeout(State) ->
-      terminate(timeout, State)
+      handleLoopTimeout(State)
    end.
+
+handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined} = State) ->
+   terminate(normal, State);
+handleLoopTimeout(#wsState{stage = wsWs} = State) ->
+   loop(self(), State);
+handleLoopTimeout(#wsState{socket = Socket} = State) ->
+   catch sendRescueResponse(Socket, 408, <<"Request Timeout">>),
+   terminate(timeout, State).
 
 loopTimeout(#wsState{stage = wsWs}) ->
    infinity;
@@ -187,7 +195,7 @@ handleCR(CurState, Result, From) ->
    end.
 
 innerError(_CurState, Error, Class, Reason, Strace) ->
-   error_logger:error_msg("wsHttp inner error ~p ~p ~p ~p ~p~n", [?MODULE, Error, Class, Reason, Strace]),
+   logger:error("wsHttp inner error ~p ~p ~p ~p ~p", [?MODULE, Error, Class, Reason, Strace]),
    ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -471,7 +479,7 @@ doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Ver
    {SBody, UserHeaders1} = tryCompressResponse(Body, UserHeaders0, ReqHeaders, Code, Method),
    UserHeaders = lists:keydelete(<<"Transfer-Encoding">>, 1,
       lists:keydelete(<<"Content-Length">>, 1, UserHeaders1)),
-   NHeaders = [{<<"Content-Length">>, iolist_size(SBody)} | UserHeaders],
+   NHeaders = normalizeContentLength(Code, Method, iolist_size(SBody), UserHeaders),
    Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
    Headers = addConnectionHeader(NHeaders, Policy, Version),
    sendResponse(Socket, Method, Code, Headers, SBody),
@@ -536,6 +544,17 @@ doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeade
             _Err -> {stop, Ret}
          end
    end.
+
+normalizeContentLength(Code, _Method, _BodySize, Headers) when Code >= 100, Code < 200 ->
+   Headers;
+normalizeContentLength(204, _Method, _BodySize, Headers) ->
+   Headers;
+normalizeContentLength(304, _Method, _BodySize, Headers) ->
+   Headers;
+normalizeContentLength(205, _Method, _BodySize, Headers) ->
+   [{<<"Content-Length">>, 0} | Headers];
+normalizeContentLength(_Code, _Method, BodySize, Headers) ->
+   [{<<"Content-Length">>, BodySize} | Headers].
 
 %% @doc Generate a HTTP response and send it to the client.
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
