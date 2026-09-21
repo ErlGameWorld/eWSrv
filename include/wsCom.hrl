@@ -27,6 +27,8 @@
 -define(DefMaxHeaderSize, 64 * 1024).
 -define(DefMaxWsFrameSize, 1 * 1024 * 1024).
 -define(DefMaxWsMessageSize, 8 * 1024 * 1024).
+-define(DefRequestTimeout, 30000).
+-define(DefKeepAliveTimeout, 60000).
 
 -define(CASE(Cond, Then, That), case Cond of true -> Then; _ -> That end).
 
@@ -62,6 +64,9 @@
    , maxWsFrameSize = ?DefMaxWsFrameSize :: pos_integer()           %% WebSocket单帧上限
    , maxWsMessageSize = ?DefMaxWsMessageSize :: pos_integer()       %% WebSocket单消息上限
    , chunkedSupp = false :: boolean()                               %% 是否允许客户端发送chunked
+   , requestTimeout = ?DefRequestTimeout :: pos_integer()           %% 单个HTTP请求总超时
+   , keepAliveTimeout = ?DefKeepAliveTimeout :: pos_integer()       %% 空闲Keep-Alive超时
+   , requestStartedAt :: undefined | integer()                      %% 当前HTTP请求开始时间(monotonic ms)
 
    , is_behavior = false :: boolean()                         %% 是否是行为连接
    , fragmented = false :: boolean()                                %% websocket
