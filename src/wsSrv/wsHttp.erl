@@ -344,6 +344,26 @@ handleMsg({h2_request_timeout, StreamId, Token},
       {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
       {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
    end;
+handleMsg({h2_stream_start, StreamId, WorkerPid, Token, Req, Headers, Initial},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamStart(
+      StreamId, WorkerPid, Token, Req, Headers, Initial, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_stream_chunk, StreamId, WorkerPid, Token, Data, From},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamChunk(
+      StreamId, WorkerPid, Token, Data, From, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_stream_close, StreamId, WorkerPid, From},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamClose(StreamId, WorkerPid, From, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
 handleMsg({h2_response, StreamId, WorkerPid, Req, Response},
    #wsState{protocol = http2, h2State = H2} = State) ->
    case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
