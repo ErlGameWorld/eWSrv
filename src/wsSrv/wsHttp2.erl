@@ -5,7 +5,7 @@
 -export([
    new/6, start/1, handleData/2,
    handleResponse/5, handleWorkerDown/3, handleRequestTimeout/3,
-   handleStreamStart/7, handleStreamChunk/7, handleStreamClose/4,
+   handleStreamStart/7, handleStreamChunk/6, handleStreamClose/4,
    hasOpenStreams/1, idleClose/1, terminate/1
 ]).
 
