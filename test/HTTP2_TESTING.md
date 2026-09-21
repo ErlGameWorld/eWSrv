@@ -132,3 +132,127 @@ HPACK、frame parser、stream state、handler worker 和 response DATA path 的�
 
 正式比较 HTTP/1.1 与 HTTP/2 时，建议同时使用 eWCli benchmark，以保持客户端实现、
 机器、payload 和测试方法一致。
+
+
+## 4. HTTP/1.1 对照性能基准
+
+HTTP/1.1 benchmark：
+
+```erlang
+wsHttp1Bench:run().
+```
+
+默认参数：
+
+- 10,000 measured requests
+- 1,000 warm-up requests
+- 32 条 keep-alive TCP connections
+- 每连接同一时刻最多 1 个 in-flight request
+- 与 HTTP/2 使用相同的 `wsHttp2TestHandler`
+- 默认路径同为 `/one`
+
+自定义：
+
+```erlang
+wsHttp1Bench:run(#{
+    requests => 50000,
+    concurrency => 64,
+    warmup => 5000,
+    path => <<"/one">>
+}).
+```
+
+输出字段与 `wsHttp2Bench` 完全一致：
+
+- requests/sec
+- total time
+- average latency
+- p50
+- p95
+- p99
+
+### H1 与 H2 一键对比
+
+```erlang
+wsHttpBench:compare().
+```
+
+或：
+
+```erlang
+wsHttpBench:compare(#{
+    requests => 50000,
+    concurrency => 32,
+    warmup => 5000,
+    path => <<"/one">>
+}).
+```
+
+公平性口径：
+
+| 参数 | HTTP/1.1 | HTTP/2 |
+| --- | --- | --- |
+| concurrency=N | N 条 keep-alive connection | 1 条 connection 上 N 个 stream |
+| handler | wsHttp2TestHandler | wsHttp2TestHandler |
+| path | 相同 | 相同 |
+| measured requests | 相同 | 相同 |
+| warm-up | 相同 | 相同 |
+| 网络 | localhost loopback | localhost loopback |
+
+这样比较的是现实中常见的 **HTTP/1.1 connection pool vs HTTP/2 multiplexing**。
+
+### 并发矩阵
+
+一次跑多个并发点：
+
+```erlang
+wsHttpBench:matrix().
+```
+
+默认：
+
+```text
+1 / 8 / 16 / 32 / 64
+```
+
+也可以：
+
+```erlang
+wsHttpBench:matrix(#{
+    requests => 20000,
+    warmup => 2000,
+    concurrencies => [1, 4, 8, 16, 32, 64, 100],
+    path => <<"/one">>
+}).
+```
+
+矩阵输出可以直接观察：
+
+- H1 connection pool 扩展曲线
+- H2 multiplexing 扩展曲线
+- H2/H1 throughput ratio
+- 两边 p95 latency
+
+建议正式性能报告至少测：
+
+```text
+small response: /one
+large response: /large
+concurrency:    1 / 8 / 16 / 32 / 64 / 100
+requests:       >= 50,000
+warmup:         >= 5,000
+repeat:         >= 3 runs
+```
+
+并分别记录：
+
+- req/s
+- avg / p50 / p95 / p99
+- CPU usage
+- scheduler utilization
+- process count
+- memory / binary memory
+- reductions
+- network bytes
+
+对于 TLS，还应再做一组 HTTPS/ALPN h2 对比 HTTPS/HTTP/1.1，因为 TLS record、ALPN 与加密成本会改变实际结果。
