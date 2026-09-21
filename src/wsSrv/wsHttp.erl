@@ -473,7 +473,14 @@ maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
 maybeSendWsClose(_State, _Reason) ->
    ok.
 
-terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, is_behavior = IsBehavior} = _State) ->
+terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState,
+   is_behavior = IsBehavior, protocol = Protocol, h2State = H2State} = _State) ->
+   case {Protocol, H2State} of
+      {http2, H2} when is_map(H2) ->
+         catch wsHttp2:terminate(H2);
+      _ ->
+         ok
+   end,
    case IsBehavior andalso erlang:function_exported(WsMod, terminate, 2) of
       true ->
          try WsMod:terminate(Reason, WebState) catch _:_ -> ok end;
