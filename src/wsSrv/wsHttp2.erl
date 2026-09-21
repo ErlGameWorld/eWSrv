@@ -2,7 +2,7 @@
 
 -include("wsCom.hrl").
 
--export([new/5, start/1, handleData/2, handleResponse/4, handleWorkerDown/3, terminate/1]).
+-export([new/5, start/1, handleData/2, handleResponse/5, handleWorkerDown/3, terminate/1]).
 
 -define(PREFACE, <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>).
 -define(END_STREAM, 16#01).
@@ -620,7 +620,7 @@ handleWorkerDown(MonitorRef, Reason, State0) ->
    case findWorkerStream(MonitorRef, maps:to_list(maps:get(streams, State0))) of
       none ->
          {ok, State0};
-      {StreamId, Stream} when Reason =:= normal ->
+      {_StreamId, _Stream} when Reason =:= normal ->
          %% Normally the response message is delivered before DOWN. If the stream
          %% is still present here, keep it until the response message is handled.
          {ok, State0};
