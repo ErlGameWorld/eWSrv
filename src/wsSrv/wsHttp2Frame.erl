@@ -227,16 +227,17 @@ splitLoop(Bin, Max, Acc) ->
 %% @returns `{ok, 列表}'；长度非 6 的倍数时返回 `{error, badSettingsLength}'
 -spec settingsDecode(binary()) -> {ok, [{atom(), non_neg_integer()}]} | {error, term()}.
 settingsDecode(Bin) when byte_size(Bin) rem 6 =:= 0 ->
-	settingsLoop(Bin, [], #{});
+	settingsLoop(Bin, []);
 settingsDecode(_) ->
 	{error, badSettingsLength}.
 
-settingsLoop(<<>>, Acc, _Seen) -> {ok, lists:reverse(Acc)};
-settingsLoop(<<Id:16, _V:32, _Rest/binary>>, _Acc, Seen) when is_map_key(Id, Seen) ->
-	%% RFC 9113 §6.5.2：同一 SETTINGS 帧里的标识符不得重复。
-	{error, {duplicateSetting, Id}};
-settingsLoop(<<Id:16, V:32, Rest/binary>>, Acc, Seen) ->
-	settingsLoop(Rest, [{settingAtom(Id), V} | Acc], Seen#{Id => true}).
+%% RFC 9113 §6.5：SETTINGS 按出现顺序处理；同一 identifier 重复时
+%% 最后出现的值覆盖前值。这里直接 keystore，返回列表中每个 setting
+%% 最终只保留一个值，避免上层 proplists:get_value/3 误取旧值。
+settingsLoop(<<>>, Acc) -> {ok, Acc};
+settingsLoop(<<Id:16, V:32, Rest/binary>>, Acc) ->
+	Key = settingAtom(Id),
+	settingsLoop(Rest, lists:keystore(Key, 1, Acc, {Key, V})).
 
 %%====================================================================
 %% frame 解析器
@@ -321,7 +322,7 @@ pingData(_) -> {error, badPing}.
 
 %% WINDOW_UPDATE 负载：R(1) + 31 位增量。增量必须为正，否则是协议错误。
 %% 保留位按 RFC 9113 §6.9 接收侧必须忽略（对端置位不构成断连理由），
-%% 只取低 31 位为增量；帧头的保留位才在 feed 层按 PROTOCOL_ERROR 拒绝
+%% 只取低 31 位为增量；frame header 的保留位同样由 feed/2 忽略
 -spec windowUpdateIncrement(binary()) -> {ok, pos_integer()} | {error, term()}.
 windowUpdateIncrement(<<_:1, Inc:31>>) when Inc > 0 -> {ok, Inc};
 windowUpdateIncrement(<<_:1, 0:31>>) -> {error, zeroIncrement};
