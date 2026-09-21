@@ -17,6 +17,7 @@
    , splitArgs/1
    , closeOrKeepAlive/2
    , maybeSendContinue/2
+   , tryCompressResponse/5
 ]).
 
 %% eNet callback
