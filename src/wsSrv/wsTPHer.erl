@@ -49,6 +49,51 @@ doHandle('GET', <<"/html">>, _WsReq) ->
 			{ok, [{<<"Content-Type">>, <<"text/plain">>}], Msg}
 	end;
 
+%% HTTP/2 专项浏览器测试页。浏览器侧请使用 HTTPS + ALPN h2。
+doHandle('GET', <<"/http2">>, _WsReq) ->
+	FilePath = filename:join([code:priv_dir(eWSrv), "http2-test.html"]),
+	case file:read_file(FilePath, [raw]) of
+		{ok, Html} ->
+			{ok, [{<<"Content-Type">>, <<"text/html; charset=utf-8">>}], Html};
+		{error, Reason} ->
+			{500, [{<<"Content-Type">>, <<"text/plain">>}],
+				iolist_to_binary(io_lib:format("HTTP/2 test page error: ~p", [Reason]))}
+	end;
+
+%% 返回服务端实际看到的协议版本，配合浏览器 Performance API 双重确认 h2。
+doHandle('GET', <<"/h2/info">>, #wsReq{version = Version, scheme = Scheme} = _WsReq) ->
+	Json = iolist_to_binary([
+		<<"{\"server\":\"eWSrv\",\"version\":\"">>, versionBin(Version),
+		<<"\",\"scheme\":\"">>, schemeBin(Scheme), <<"\"}">>
+	]),
+	{ok, [
+		{<<"Content-Type">>, <<"application/json">>},
+		{<<"Cache-Control">>, <<"no-store">>}
+	], Json};
+
+%% 延迟响应用于验证同一 HTTP/2 connection 上多个 stream 是否真正并行。
+doHandle('GET', <<"/h2/delay/", DelayBin/binary>>, _WsReq) ->
+	case boundedInt(DelayBin, 0, 5000) of
+		{ok, Delay} ->
+			timer:sleep(Delay),
+			{ok, [{<<"Content-Type">>, <<"text/plain">>}],
+				iolist_to_binary([<<"delay ">>, integer_to_binary(Delay), <<" ms">>])};
+		error ->
+			{400, [], <<"delay must be 0..5000 ms">>}
+	end;
+
+%% 动态大响应，用于 DATA frame / flow-control / throughput 测试。
+doHandle('GET', <<"/h2/bytes/", SizeBin/binary>>, _WsReq) ->
+	case boundedInt(SizeBin, 0, 64 * 1024 * 1024) of
+		{ok, Size} ->
+			{ok, [
+				{<<"Content-Type">>, <<"application/octet-stream">>},
+				{<<"Cache-Control">>, <<"no-store">>}
+			], binary:copy(<<$x>>, Size)};
+		error ->
+			{400, [], <<"size must be 0..67108864 bytes">>}
+	end;
+
 doHandle('GET', <<"/status/", Code/binary>>, _WsReq) ->
 	{binary_to_integer(Code), [{<<"Content-Type">>, <<"text/plain">>}], wsHttp:status(binary_to_integer(Code))};
 
@@ -322,6 +367,24 @@ doHandle(_Method, _Path, _WsReq) ->
 	{404, [], <<"Not Found">>}.
 
 %% 辅助函数
+versionBin({Major, Minor}) ->
+	[integer_to_binary(Major), <<".">>, integer_to_binary(Minor)];
+versionBin(Other) ->
+	io_lib:format("~p", [Other]).
+
+schemeBin(undefined) -> <<"undefined">>;
+schemeBin(Scheme) when is_binary(Scheme) -> Scheme;
+schemeBin(Scheme) when is_atom(Scheme) -> atom_to_binary(Scheme, utf8);
+schemeBin(Scheme) -> iolist_to_binary(io_lib:format("~p", [Scheme])).
+
+boundedInt(Bin, Min, Max) ->
+	try binary_to_integer(Bin) of
+		N when N >= Min, N =< Max -> {ok, N};
+		_ -> error
+	catch
+		_:_ -> error
+	end.
+
 formatValue(Value) when is_binary(Value) -> Value;
 formatValue(Value) when is_list(Value) -> list_to_binary(Value);
 formatValue(Value) when is_atom(Value) -> atom_to_binary(Value, utf8);
