@@ -240,8 +240,9 @@ handleMsg({tcp, _Socket, Data}, State0) ->
    case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
+         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         Version = WsReq#wsReq.version,
+         case doResponse(Response, Socket, TemHeader, Method, Version) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -295,8 +296,9 @@ handleMsg({ssl, _Socket, Data}, State0) ->
    case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
+         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         Version = WsReq#wsReq.version,
+         case doResponse(Response, Socket, TemHeader, Method, Version) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -465,15 +467,20 @@ doHandle(State) ->
    end.
 
 %% Inject compression for normal responses
-doResponse({response, Code, UserHeaders, Body}, Socket, TemHeader, Method) ->
-   {SBody, NUserHeaders} = tryCompressResponse(Body, UserHeaders, TemHeader, Code, Method),
-   %% Recalculate Content-Length after potential compression
-   NHeaders = lists:keystore(<<"Content-Length">>, 1, NUserHeaders, {<<"Content-Length">>, iolist_size(SBody)}),
-   Headers = [connection(NHeaders, TemHeader) | NHeaders],
+doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version) ->
+   {SBody, UserHeaders1} = tryCompressResponse(Body, UserHeaders0, ReqHeaders, Code, Method),
+   UserHeaders = lists:keydelete(<<"Transfer-Encoding">>, 1,
+      lists:keydelete(<<"Content-Length">>, 1, UserHeaders1)),
+   NHeaders = [{<<"Content-Length">>, iolist_size(SBody)} | UserHeaders],
+   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
+   Headers = addConnectionHeader(NHeaders, Policy, Version),
    sendResponse(Socket, Method, Code, Headers, SBody),
-   closeOrKeepAlive(NUserHeaders, TemHeader);
-doResponse({chunk, UserHeaders, Initial}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [transferEncoding(UserHeaders), connection(UserHeaders, TemHeader) | UserHeaders],
+   Policy;
+doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) ->
+   UserHeaders = lists:keydelete(<<"Content-Length">>, 1, UserHeaders0),
+   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
+   ResponseHeaders = addConnectionHeader(
+      [transferEncoding(UserHeaders) | UserHeaders], Policy, Version),
    sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
    case Method of
       'HEAD' ->
@@ -485,13 +492,15 @@ doResponse({chunk, UserHeaders, Initial}, Socket, TemHeader, Method) ->
             ok -> server
          end
    end,
-   closeOrKeepAlive(UserHeaders, TemHeader);
+   Policy;
 %% WebSocket升级响应
-doResponse({wsWebSocket, UserHeaders}, Socket, _TemHeader, _Method) ->
+doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version) ->
    sendResponse(Socket, 'GET', 101, UserHeaders, <<>>),
    keep_ws;
-doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [connection(UserHeaders, TemHeader) | UserHeaders],
+doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version) ->
+   Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
+   UserHeaders = lists:keydelete(<<"Content-Length">>, 1, UserHeaders0),
+   ResponseHeaders = addConnectionHeader(UserHeaders, Policy, Version),
    case wsUtil:fileSize(Filename) of
       {error, _FileError} ->
          sendSrvError(Socket),
@@ -507,21 +516,24 @@ doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader
                   end;
                {Offset, Length} ->
                   ERange = wsUtil:encodeRange({Offset, Length}, Size),
-                  FileHeaders = lists:append(ResponseHeaders, [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange}]),
+                  FileHeaders = [
+                     {<<"Content-Length">>, Length},
+                     {<<"Content-Range">>, ERange}
+                     | ResponseHeaders
+                  ],
                   case Method of
                      'HEAD' -> sendResponse(Socket, Method, 206, FileHeaders, <<>>);
                      _ -> sendFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
                   end;
                invalid_range ->
                   ERange = wsUtil:encodeRange(invalid_range, Size),
-                  sendResponse(Socket, Method, 416, lists:append(ResponseHeaders, [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange}]), <<>>),
-                  {error, range}
+                  sendResponse(Socket, Method, 416,
+                     [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>),
+                  ok
             end,
          case Ret of
-            ok ->
-               closeOrKeepAlive(UserHeaders, TemHeader);
-            _Err ->
-               {stop, Ret}
+            ok -> Policy;
+            _Err -> {stop, Ret}
          end
    end.
 
@@ -552,10 +564,11 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
 
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
-   %% skip when no body should be sent
-   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 304),
-   case Skip orelse iolist_size(Body) =:= 0 of
-      true -> {Body, UserHeaders};
+   BodySize = iolist_size(Body),
+   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 304) orelse BodySize < 1024,
+   case Skip of
+      true ->
+         {Body, UserHeaders};
       false ->
          case lists:keyfind(<<"Content-Encoding">>, 1, UserHeaders) of
             false ->
@@ -578,30 +591,73 @@ chooseContentEncoding(ReqHeaders) ->
    case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
       false ->
          none;
-      {_, V} ->
-         Lower = lowerBin(V),
-         case binary:match(Lower, <<"gzip">>) of
-            nomatch ->
-               case binary:match(Lower, <<"deflate">>) of
-                  nomatch ->
-                     none;
-                  _ ->
-                     deflate
-               end;
-            _ ->
-               gzip
+      {_, Value} ->
+         Encodings = parseAcceptEncodings(iolist_to_binary(Value)),
+         GzipQ = encodingQ(<<"gzip">>, Encodings),
+         DeflateQ = encodingQ(<<"deflate">>, Encodings),
+         case {GzipQ, DeflateQ} of
+            {G, D} when G > 0, G >= D -> gzip;
+            {_G, D} when D > 0 -> deflate;
+            _ -> none
          end
    end.
 
-lowerBin(Bin) when is_binary(Bin) ->
-   string:lowercase(Bin);
-lowerBin(L) when is_list(L) ->
-   list_to_binary(string:lowercase(L)).
+parseAcceptEncodings(Value) ->
+   [
+      begin
+         Parts = [string:trim(P) || P <- binary:split(string:lowercase(Token), <<";">>, [global])],
+         case Parts of
+            [Encoding] -> {Encoding, 1000};
+            [Encoding | Params] -> {Encoding, parseEncodingQ(Params)}
+         end
+      end
+      || Token <- binary:split(Value, <<",">>, [global])
+   ].
+
+parseEncodingQ(Params) ->
+   case [V || P <- Params,
+              [K, V] <- [binary:split(P, <<"=">>)],
+              string:trim(K) =:= <<"q">>] of
+      [Q | _] -> qValue(string:trim(Q));
+      [] -> 1000
+   end.
+
+qValue(<<"0">>) -> 0;
+qValue(<<"1">>) -> 1000;
+qValue(<<"0.", Digits/binary>>) -> fractionQ(Digits);
+qValue(<<"1.", Digits/binary>>) ->
+   case allZero(Digits) of true -> 1000; false -> 0 end;
+qValue(_) -> 0.
+
+fractionQ(Digits0) ->
+   Digits = binary:part(<<Digits0/binary, "000">>, 0, 3),
+   try binary_to_integer(Digits) catch _:_ -> 0 end.
+
+allZero(<<>>) -> true;
+allZero(<<$0, Rest/binary>>) -> allZero(Rest);
+allZero(_) -> false.
+
+encodingQ(Name, Encodings) ->
+   case lists:keyfind(Name, 1, Encodings) of
+      {_, Q} -> Q;
+      false ->
+         case lists:keyfind(<<"*">>, 1, Encodings) of
+            {_, Q} -> Q;
+            false -> 0
+         end
+   end.
 
 addVary(Hs) ->
    case lists:keyfind(<<"Vary">>, 1, Hs) of
-      false -> [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
-      _ -> Hs
+      false ->
+         [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
+      {_, Value} ->
+         Tokens = [string:trim(T) || T <- binary:split(iolist_to_binary(Value), <<",">>, [global])],
+         case lists:member(<<"Accept-Encoding">>, Tokens) of
+            true -> Hs;
+            false -> lists:keyreplace(<<"Vary">>, 1, Hs,
+               {<<"Vary">>, [Value, <<", Accept-Encoding">>]})
+         end
    end.
 
 %% @doc Send a HTTP response to the client where the body is the
