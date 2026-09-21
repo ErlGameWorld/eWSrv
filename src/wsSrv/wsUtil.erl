@@ -143,9 +143,9 @@ chunkSize(Opts) ->
          when is_integer(ChunkSize) andalso ChunkSize > 0 ->
          ChunkSize;
       {chunk_size, 0} ->
-         16#1FFF;
+         64 * 1024;
       false ->
-         16#1FFF
+         64 * 1024
    end.
 
 -spec sendfileLoop(inet:socket() | ssl:sslsocket(), file:fd(), non_neg_integer(), non_neg_integer(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
