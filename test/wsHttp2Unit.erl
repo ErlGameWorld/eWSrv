@@ -145,6 +145,62 @@ recvUntilSsl(Pred, Sock, Parser0, Acc0, Timeout) ->
    end.
 
 
+
+http2_header_compatibility_test_() ->
+   {timeout, 20, fun headerCompatibility/0}.
+
+headerCompatibility() ->
+   Name = ws_http2_header_compat_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
+      Origin = <<"https://example.com">>,
+      Headers = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/api/test">>},
+         {<<"origin">>, Origin}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, _Body} = decodeResponse(Frames),
+      ?assertEqual(Origin, proplists:get_value(<<"access-control-allow-origin">>, RespHeaders)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_continuation_integration_test_() ->
+   {timeout, 20, fun continuationRequest/0}.
+
+continuationRequest() ->
+   Name = ws_http2_cont_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      Large = base64:encode(crypto:strong_rand_bytes(18000)),
+      Headers = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/one">>},
+         {<<"x-large">>, Large}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ReqFrames = wsHttp2Frame:headersFrames(Block, 1, 16384, true),
+      {_P, ParsedReqFrames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(ReqFrames)),
+      ?assert(lists:any(fun
+         ({frame, continuation, _Flags, 1, _}) -> true;
+         (_) -> false
+      end, ParsedReqFrames)),
+      ok = gen_tcp:send(Sock, ReqFrames),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<"one">>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_post_data_integration_test_() ->
    {timeout, 20, fun postData/0}.
 
