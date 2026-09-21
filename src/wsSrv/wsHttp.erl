@@ -95,21 +95,29 @@ loop(Parent, State) ->
                terminate(Reason, NewState)
          end
    after loopTimeout(State) ->
-      handleLoopTimeout(State)
+      case handleLoopTimeout(State) of
+         {ok, NewState} ->
+            loop(Parent, NewState);
+         {stop, Reason} ->
+            terminate(Reason, State);
+         {stop, Reason, NewState} ->
+            terminate(Reason, NewState)
+      end
    end.
 
-handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined} = State) ->
-   terminate(normal, State);
-handleLoopTimeout(#wsState{stage = wsWs} = State) ->
-   loop(self(), State);
 handleLoopTimeout(#wsState{protocol = http2, h2State = H2} = State) when is_map(H2) ->
-   _ = wsHttp2:idleClose(H2),
-   terminate(normal, State);
-handleLoopTimeout(#wsState{socket = Socket} = State) ->
+   NH2 = wsHttp2:idleClose(H2),
+   _ = erlang:send_after(50, self(), h2_drain_close),
+   {ok, State#wsState{h2State = NH2}};
+handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined}) ->
+   {stop, normal};
+handleLoopTimeout(#wsState{stage = wsWs} = State) ->
+   {ok, State};
+handleLoopTimeout(#wsState{socket = Socket}) ->
    try sendRescueResponse(Socket, 408, <<"Request Timeout">>)
    catch _:_ -> ok
    end,
-   terminate(timeout, State).
+   {stop, timeout}.
 
 loopTimeout(#wsState{stage = wsWs}) ->
    infinity;
@@ -328,6 +336,8 @@ handleMsg({tcp, _Socket, Data}, State0) ->
                {stop, Err}
          end
    end;
+handleMsg(h2_drain_close, #wsState{protocol = http2} = _State) ->
+   {stop, normal};
 handleMsg({h2_request_timeout, StreamId, Token},
    #wsState{protocol = http2, h2State = H2} = State) ->
    case wsHttp2:handleRequestTimeout(StreamId, Token, H2) of
