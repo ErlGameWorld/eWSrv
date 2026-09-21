@@ -2,7 +2,11 @@
 
 -include("wsCom.hrl").
 
--export([new/5, start/1, handleData/2, handleResponse/5, handleWorkerDown/3, terminate/1]).
+-export([
+   new/6, start/1, handleData/2,
+   handleResponse/5, handleWorkerDown/3, handleRequestTimeout/3,
+   hasOpenStreams/1, idleClose/1, terminate/1
+]).
 
 -define(PREFACE, <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>).
 -define(END_STREAM, 16#01).
@@ -17,8 +21,8 @@
 
 %% HTTP/2 server connection state. Socket ownership remains in wsHttp; this
 %% module is a protocol state machine and performs writes through wsNet.
--spec new(wsSocket(), module(), http | https, non_neg_integer() | infinity, pos_integer()) -> map().
-new(Socket, WsMod, Scheme, MaxBody, MaxHeader) ->
+-spec new(wsSocket(), module(), http | https, non_neg_integer() | infinity, pos_integer(), pos_integer()) -> map().
+new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
    #{
       socket => Socket,
       ws_mod => WsMod,
@@ -40,6 +44,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader) ->
       local_initial_window => ?DEFAULT_WINDOW,
       max_body => MaxBody,
       max_header => MaxHeader,
+      request_timeout => RequestTimeout,
       max_concurrent_streams => ?DEFAULT_MAX_STREAMS,
       goaway => false
    }.
@@ -412,7 +417,7 @@ finishInitialHeaders(StreamId, EndStream, Headers, Rest, State0) ->
          ?wsWarn("HTTP/2 bad request headers stream=~p reason=~p", [StreamId, Reason]),
          applyFrames(Rest, State1);
       {ok, Req, ContentLength} ->
-         Stream = #{
+         Stream0 = #{
             req => Req,
             body_acc => [],
             body_size => 0,
@@ -420,8 +425,13 @@ finishInitialHeaders(StreamId, EndStream, Headers, Rest, State0) ->
             recv_window => maps:get(local_initial_window, State0),
             send_window => maps:get(peer_initial_window, State0),
             pending_send => <<>>,
-            response_started => false
+            response_started => false,
+            remote_closed => EndStream
          },
+         Stream = case EndStream of
+            true -> Stream0;
+            false -> armRequestTimer(StreamId, Stream0, State0)
+         end,
          State1 = State0#{
             streams => (maps:get(streams, State0))#{StreamId => Stream},
             last_client_stream => StreamId
@@ -574,8 +584,9 @@ dispatchRequest(StreamId, State0) ->
    Stream0 = maps:get(StreamId, Streams),
    case maps:get(handler_ref, Stream0, undefined) of
       undefined ->
-         Req0 = maps:get(req, Stream0),
-         Body = case maps:get(body_acc, Stream0) of
+         StreamA = cancelRequestTimer(Stream0),
+         Req0 = maps:get(req, StreamA),
+         Body = case maps:get(body_acc, StreamA) of
             [] -> <<>>;
             Acc -> iolist_to_binary(lists:reverse(Acc))
          end,
@@ -586,7 +597,7 @@ dispatchRequest(StreamId, State0) ->
             Response = callHandler(WsMod, Req#wsReq.method, Req#wsReq.path, Req),
             Parent ! {h2_response, StreamId, self(), Req, Response}
          end),
-         Stream1 = Stream0#{
+         Stream1 = StreamA#{
             req => Req,
             body_acc => [],
             remote_closed => true,
@@ -598,6 +609,36 @@ dispatchRequest(StreamId, State0) ->
          %% END_STREAM has already dispatched this request.
          {ok, State0}
    end.
+
+armRequestTimer(StreamId, Stream, State) ->
+   Token = make_ref(),
+   TimerRef = erlang:send_after(
+      maps:get(request_timeout, State), self(),
+      {h2_request_timeout, StreamId, Token}),
+   Stream#{request_timer => TimerRef, request_token => Token}.
+
+cancelRequestTimer(#{request_timer := TimerRef} = Stream) ->
+   _ = erlang:cancel_timer(TimerRef),
+   maps:remove(request_token, maps:remove(request_timer, Stream));
+cancelRequestTimer(Stream) ->
+   Stream.
+
+handleRequestTimeout(StreamId, Token, State) ->
+   case maps:get(StreamId, maps:get(streams, State), undefined) of
+      #{request_token := Token, remote_closed := false} ->
+         ?wsWarn("HTTP/2 request timeout stream=~p", [StreamId]),
+         {ok, streamError(StreamId, cancel, State)};
+      _ ->
+         {ok, State}
+   end.
+
+hasOpenStreams(State) ->
+   map_size(maps:get(streams, State, #{})) > 0.
+
+idleClose(State) ->
+   Last = maps:get(last_client_stream, State, 0),
+   _ = wsNet:send(maps:get(socket, State), wsHttp2Frame:goawayFrame(Last, no_error)),
+   State#{goaway => true}.
 
 %% @doc Apply a completed stream worker response in the owning connection process.
 %% HPACK encoder and flow-control state are connection-scoped, therefore only
@@ -1151,17 +1192,24 @@ streamError(StreamId, Code, State) ->
 dropStream(StreamId, State) ->
    Streams = maps:get(streams, State),
    case maps:get(StreamId, Streams, undefined) of
-      #{handler_pid := Pid, handler_ref := Ref} ->
-         erlang:demonitor(Ref, [flush]),
-         exit(Pid, kill);
-      _ ->
-         ok
+      undefined ->
+         ok;
+      Stream ->
+         _ = cancelRequestTimer(Stream),
+         case Stream of
+            #{handler_pid := Pid, handler_ref := Ref} ->
+               erlang:demonitor(Ref, [flush]),
+               exit(Pid, kill);
+            _ ->
+               ok
+         end
    end,
    State#{streams => maps:remove(StreamId, Streams)}.
 
 %% @doc Stop any outstanding handler workers when the connection goes away.
 terminate(State) ->
    maps:foreach(fun(_StreamId, Stream) ->
+      _ = cancelRequestTimer(Stream),
       case Stream of
          #{handler_pid := Pid, handler_ref := Ref} ->
             erlang:demonitor(Ref, [flush]),
