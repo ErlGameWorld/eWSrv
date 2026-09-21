@@ -1,9 +1,9 @@
 -include("eWSrv.hrl").
 
--define(wsErr(Str), error_logger:error_msg(Str)).
--define(wsErr(Format, Args), error_logger:error_msg(Format, Args)).
--define(wsWarn(Format, Args), error_logger:warning_msg(Format, Args)).
--define(wsInfo(Format, Args), error_logger:info_msg(Format, Args)).
+-define(wsErr(Str), logger:error(Str)).
+-define(wsErr(Format, Args), logger:error(Format, Args)).
+-define(wsWarn(Format, Args), logger:warning(Format, Args)).
+-define(wsInfo(Format, Args), logger:info(Format, Args)).
 -define(wsGLV(Key, List, Default), wsUtil:gLV(Key, List, Default)).
 
 -define(DefWsOpts, [
