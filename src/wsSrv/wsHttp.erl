@@ -702,6 +702,8 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
                   <<>>;
                204 ->
                   <<>>;
+               205 ->
+                  <<>>;
                _ ->
                   UserBody
             end
@@ -718,7 +720,7 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
    BodySize = iolist_size(Body),
-   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 304) orelse BodySize < 1024,
+   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205) orelse (Code =:= 304) orelse BodySize < 1024,
    case Skip of
       true ->
          {Body, UserHeaders};
