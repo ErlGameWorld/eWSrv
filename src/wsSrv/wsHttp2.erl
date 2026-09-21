@@ -561,9 +561,11 @@ replenishReceiveWindows(StreamId, FlowBytes, State0) ->
    end.
 
 validateRequestLength(Stream) ->
-   case maps:get(content_length, Stream, undefined) of
+   ContentLength = maps:get(content_length, Stream, undefined),
+   BodySize = maps:get(body_size, Stream),
+   case ContentLength of
       undefined -> ok;
-      N when N =:= maps:get(body_size, Stream) -> ok;
+      BodySize -> ok;
       _ -> {error, content_length_mismatch}
    end.
 
@@ -613,7 +615,7 @@ sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Method, St
       {ok, Data0} ->
          case normalizeFileRange(Data0, Range) of
             {ok, Status, ExtraHeaders, Data} ->
-               sendResponse(StreamId, StatusOr(Code, Status), Headers ++ ExtraHeaders, Data, Method, State);
+               sendResponse(StreamId, statusOr(Code, Status), Headers ++ ExtraHeaders, Data, Method, State);
             invalid_range ->
                sendResponse(StreamId, 416, Headers, <<>>, Method, State)
          end;
@@ -623,8 +625,8 @@ sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Method, St
 sendHandlerResponse(StreamId, {response, Code, Headers, Body}, Method, State) ->
    sendResponse(StreamId, Code, Headers, Body, Method, State).
 
-StatusOr(Code, 200) -> Code;
-StatusOr(_Code, Status) -> Status.
+statusOr(Code, 200) -> Code;
+statusOr(_Code, Status) -> Status.
 
 normalizeFileRange(Data, []) -> {ok, 200, [], Data};
 normalizeFileRange(Data, {0, 0}) -> {ok, 200, [], Data};
