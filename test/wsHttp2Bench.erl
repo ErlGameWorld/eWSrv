@@ -131,10 +131,10 @@ consumeFrames([], Pending, LatAcc) ->
    {Pending, LatAcc};
 consumeFrames([{error, Reason} | _], _Pending, _LatAcc) ->
    erlang:error({http2_frame_error, Reason});
-consumeFrames([{frame, rst_stream, _Flags, StreamId, Payload} | _], Pending, _LatAcc) ->
+consumeFrames([{frame, rst_stream, _Flags, StreamId, Payload} | Rest], Pending, LatAcc) ->
    case maps:is_key(StreamId, Pending) of
       true -> erlang:error({stream_reset, StreamId, wsHttp2Frame:rstStreamCode(Payload)});
-      false -> consumeFrames([], Pending, [])
+      false -> consumeFrames(Rest, Pending, LatAcc)
    end;
 consumeFrames([{frame, Type, Flags, StreamId, _Payload} | Rest], Pending0, LatAcc0) ->
    case (Type =:= headers orelse Type =:= data) andalso
