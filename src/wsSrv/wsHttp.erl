@@ -213,28 +213,47 @@ innerError(_CurState, Error, Class, Reason, Strace) ->
 %% ************************************************  API ***************************************************************
 init(Args) ->
    case Args of
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+            Http2, RequestTimeout, KeepAliveTimeout, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout}} ->
+         case maybeInitHandler(WsMod, Args) of
+            {ok, WebState} ->
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+                  Http2, RequestTimeout, KeepAliveTimeout, true, WebState)};
+            {stop, Reason} ->
+               {stop, Reason}
+         end;
+      %% 兼容前一版feature分支的9元组连接参数。
       {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, false, undefined)};
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+            Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
       {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2}} ->
          case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, true, WebState)};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+                  Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end;
       %% 兼容旧版eNet传入的4元组连接参数。
       {undefined, WsMod, MaxSize, ChunkedSupp} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, false, undefined)};
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize,
+            ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
       {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
          case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, true, WebState)};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize,
+                  ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout, true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end
    end.
 
-newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, IsBehavior, WebState) ->
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+   Http2, RequestTimeout, KeepAliveTimeout, IsBehavior, WebState) ->
    Protocol = case Http2 of true -> detect; false -> http1 end,
    #wsState{
       wsMod = WsMod,
@@ -246,6 +265,8 @@ newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, Max
       maxWsMessageSize = MaxWsMessage,
       http2Enabled = Http2,
       protocol = Protocol,
+      requestTimeout = RequestTimeout,
+      keepAliveTimeout = KeepAliveTimeout,
       is_behavior = IsBehavior,
       webState = WebState
    }.
