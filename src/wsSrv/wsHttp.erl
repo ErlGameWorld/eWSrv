@@ -812,33 +812,36 @@ toBinStr(V) when is_list(V) -> list_to_binary(V);
 toBinStr(V) when is_atom(V) -> atom_to_binary(V).
 
 closeOrKeepAlive(UserHeaders, ReqHeader) ->
-   case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
-      {_, <<"Close">>} ->
+   connectionPolicy(UserHeaders, ReqHeader, {1, 1}).
+
+connectionPolicy(UserHeaders, ReqHeaders, Version) ->
+   RespClose = headerHasToken(<<"Connection">>, UserHeaders, <<"close">>),
+   ReqClose = headerHasToken('Connection', ReqHeaders, <<"close">>),
+   ReqKeep = headerHasToken('Connection', ReqHeaders, <<"keep-alive">>),
+   case RespClose orelse ReqClose of
+      true ->
          close;
-      {_, <<"close">>} ->
-         close;
-      _ ->
-         case lists:keyfind('Connection', 1, ReqHeader) of
-            {_, <<"Close">>} ->
-               close;
-            {_, <<"close">>} ->
-               close;
-            _ ->
-               keep_alive
-         end
+      false when Version =:= {1, 0} ->
+         case ReqKeep of true -> keep_alive; false -> close end;
+      false ->
+         keep_alive
    end.
 
-connection(UserHeaders, ReqHeader) ->
-   case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
-      false ->
-         case lists:keyfind('Connection', 1, ReqHeader) of
-            false ->
-               {<<"Connection">>, <<"Keep-Alive">>};
-            {_HKey, HValue} ->
-               {<<"Connection">>, HValue}
-         end;
-      _ ->
-         []
+addConnectionHeader(Headers0, Policy, Version) ->
+   Headers = lists:keydelete(<<"Connection">>, 1, Headers0),
+   case {Policy, Version} of
+      {close, _} -> [{<<"Connection">>, <<"close">>} | Headers];
+      {keep_alive, {1, 0}} -> [{<<"Connection">>, <<"Keep-Alive">>} | Headers];
+      {keep_alive, _} -> Headers
+   end.
+
+headerHasToken(Name, Headers, Wanted) ->
+   case lists:keyfind(Name, 1, Headers) of
+      false -> false;
+      {_, Value} ->
+         Lower = wsUtil:toLowerStr(iolist_to_binary(Value)),
+         Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
+         lists:member(Wanted, Tokens)
    end.
 
 transferEncoding(Headers) ->
@@ -870,6 +873,7 @@ status(304) -> <<"304 Not Modified">>;
 status(305) -> <<"305 Use Proxy">>;
 status(306) -> <<"306 Switch Proxy">>;
 status(307) -> <<"307 Temporary Redirect">>;
+status(308) -> <<"308 Permanent Redirect">>;
 status(400) -> <<"400 Bad Request">>;
 status(401) -> <<"401 Unauthorized">>;
 status(402) -> <<"402 Payment Required">>;
