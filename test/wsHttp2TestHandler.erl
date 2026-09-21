@@ -14,6 +14,8 @@ handle('GET', <<"/slow">>, _Req) ->
 handle('GET', <<"/large">>, _Req) ->
    {ok, [{<<"content-type">>, <<"application/octet-stream">>}],
       binary:copy(<<"x">>, 100000)};
+handle('GET', <<"/reset-content">>, _Req) ->
+   {205, [{<<"content-type">>, <<"text/plain">>}], <<"must-not-be-sent">>};
 handle('POST', <<"/echo">>, #wsReq{body = Body}) ->
    {ok, [{<<"content-type">>, <<"application/octet-stream">>}], Body};
 handle(_, _, _) ->
