@@ -93,7 +93,20 @@ loop(Parent, State) ->
             {stop, Reason, NewState} ->
                terminate(Reason, NewState)
          end
+   after loopTimeout(State) ->
+      terminate(timeout, State)
    end.
+
+loopTimeout(#wsState{stage = wsWs}) ->
+   infinity;
+loopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined,
+   keepAliveTimeout = Timeout}) ->
+   Timeout;
+loopTimeout(#wsState{requestStartedAt = undefined, requestTimeout = Timeout}) ->
+   Timeout;
+loopTimeout(#wsState{requestStartedAt = Started, requestTimeout = Timeout}) ->
+   Now = erlang:monotonic_time(millisecond),
+   erlang:max(0, Timeout - (Now - Started)).
 
 matchCallMsg(CurState, From, Request) ->
    #wsState{wsMod = WsMod, webState = WebState} = CurState,
@@ -221,7 +234,8 @@ maybeInitHandler(WsMod, Args) ->
       false -> {ok, undefined}
    end.
 
-handleMsg({tcp, _Socket, Data}, State) ->
+handleMsg({tcp, _Socket, Data}, State0) ->
+   State = ensureRequestStarted(State0),
    #wsState{stage = Stage, socket = Socket} = State,
    case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
@@ -275,7 +289,8 @@ handleMsg({tcp_passive, Socket}, _State) ->
    wsNet:setopts(Socket, [{active, ?ActionN}]),
    kpS;
 
-handleMsg({ssl, _Socket, Data}, State) ->
+handleMsg({ssl, _Socket, Data}, State0) ->
+   State = ensureRequestStarted(State0),
    #wsState{stage = Stage, socket = Socket} = State,
    case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
@@ -382,6 +397,13 @@ terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, 
    end,
    exit(Reason).
 
+ensureRequestStarted(#wsState{stage = wsWs} = State) ->
+   State;
+ensureRequestStarted(#wsState{requestStartedAt = undefined} = State) ->
+   State#wsState{requestStartedAt = erlang:monotonic_time(millisecond)};
+ensureRequestStarted(State) ->
+   State.
+
 newWsState(WsState) ->
    WsState#wsState{
       stage = reqLine
@@ -396,6 +418,7 @@ newWsState(WsState) ->
       , bodySize = 0
       , chunkState = size
       , temChunked = <<>>
+      , requestStartedAt = undefined
    }.
 
 %% @doc Execute the user callback, translating failure into a proper response.
