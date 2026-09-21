@@ -243,7 +243,7 @@ handleMsg({tcp, _Socket, Data}, State) ->
                case NBuffer of
                   <<>> -> {ok, NewWsState};
                   _ ->
-                     handleMsg({ssl, Socket, NBuffer}, NewWsState)
+                     handleMsg({tcp, Socket, NBuffer}, NewWsState)
                end;
             close ->
                {stop, normal}
@@ -296,7 +296,7 @@ handleMsg({ssl, _Socket, Data}, State) ->
                case NBuffer of
                   <<>> -> {ok, NewWsState};
                   _ ->
-                     handleMsg({tcp, Socket, NBuffer}, NewWsState)
+                     handleMsg({ssl, Socket, NBuffer}, NewWsState)
                end;
             close ->
                {stop, normal}
@@ -355,6 +355,9 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
          kpS
    end.
 
+maybeSendWsClose(#wsState{stage = wsWs}, normal) ->
+   %% 正常Close handshake已在wsWebSocket中回显Close帧。
+   ok;
 maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
    Code =
       case Reason of
