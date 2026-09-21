@@ -2,7 +2,7 @@
 
 -include("wsCom.hrl").
 
--export([new/5, start/1, handleData/2]).
+-export([new/5, start/1, handleData/2, handleResponse/4, handleWorkerDown/3]).
 
 -define(PREFACE, <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>).
 -define(END_STREAM, 16#01).
@@ -572,14 +572,74 @@ validateRequestLength(Stream) ->
 dispatchRequest(StreamId, State0) ->
    Streams = maps:get(streams, State0),
    Stream0 = maps:get(StreamId, Streams),
-   Req0 = maps:get(req, Stream0),
-   Body = case maps:get(body_acc, Stream0) of
-      [] -> <<>>;
-      Acc -> iolist_to_binary(lists:reverse(Acc))
-   end,
-   Req = Req0#wsReq{body = Body},
-   Response = callHandler(maps:get(ws_mod, State0), Req#wsReq.method, Req#wsReq.path, Req),
-   sendHandlerResponse(StreamId, Response, Req, State0).
+   case maps:get(handler_ref, Stream0, undefined) of
+      undefined ->
+         Req0 = maps:get(req, Stream0),
+         Body = case maps:get(body_acc, Stream0) of
+            [] -> <<>>;
+            Acc -> iolist_to_binary(lists:reverse(Acc))
+         end,
+         Req = Req0#wsReq{body = Body},
+         WsMod = maps:get(ws_mod, State0),
+         Parent = self(),
+         {Pid, MonitorRef} = spawn_monitor(fun() ->
+            Response = callHandler(WsMod, Req#wsReq.method, Req#wsReq.path, Req),
+            Parent ! {h2_response, StreamId, self(), Req, Response}
+         end),
+         Stream1 = Stream0#{
+            req => Req,
+            body_acc => [],
+            remote_closed => true,
+            handler_pid => Pid,
+            handler_ref => MonitorRef
+         },
+         {ok, State0#{streams => Streams#{StreamId := Stream1}}};
+      _ ->
+         %% END_STREAM has already dispatched this request.
+         {ok, State0}
+   end.
+
+%% @doc Apply a completed stream worker response in the owning connection process.
+%% HPACK encoder and flow-control state are connection-scoped, therefore only
+%% the connection process is allowed to encode/send the response.
+handleResponse(StreamId, WorkerPid, Req, Response, State0) ->
+   Streams = maps:get(streams, State0),
+   case maps:get(StreamId, Streams, undefined) of
+      #{handler_pid := WorkerPid, handler_ref := MonitorRef} = Stream ->
+         erlang:demonitor(MonitorRef, [flush]),
+         Stream1 = maps:remove(handler_ref, maps:remove(handler_pid, Stream)),
+         State1 = State0#{streams => Streams#{StreamId := Stream1}},
+         sendHandlerResponse(StreamId, Response, Req, State1);
+      _ ->
+         %% Stream may have been reset/closed while the worker was running.
+         {ok, State0}
+   end.
+
+%% @doc Convert an abnormal worker exit into a stream-local 500 response.
+handleWorkerDown(MonitorRef, Reason, State0) ->
+   case findWorkerStream(MonitorRef, maps:to_list(maps:get(streams, State0))) of
+      none ->
+         {ok, State0};
+      {StreamId, Stream} when Reason =:= normal ->
+         %% Normally the response message is delivered before DOWN. If the stream
+         %% is still present here, keep it until the response message is handled.
+         {ok, State0};
+      {StreamId, Stream} ->
+         Req = maps:get(req, Stream),
+         ?wsErr("HTTP/2 stream worker down stream=~p reason=~p", [StreamId, Reason]),
+         Streams = maps:get(streams, State0),
+         Stream1 = maps:remove(handler_ref, maps:remove(handler_pid, Stream)),
+         State1 = State0#{streams => Streams#{StreamId := Stream1}},
+         sendHandlerResponse(StreamId,
+            {response, 500, [], <<"Internal server error">>}, Req, State1)
+   end.
+
+findWorkerStream(_Ref, []) ->
+   none;
+findWorkerStream(Ref, [{StreamId, #{handler_ref := Ref} = Stream} | _]) ->
+   {StreamId, Stream};
+findWorkerStream(Ref, [_ | Rest]) ->
+   findWorkerStream(Ref, Rest).
 
 callHandler(WsMod, Method, Path, Req) ->
    try WsMod:handle(Method, Path, Req) of
