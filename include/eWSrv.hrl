@@ -5,8 +5,12 @@
 listenOpt() |                 %% eNet相关配置
 {wsMod, module()} |           %% 请求处理的回调模块
 {wsSupName, pid() | term()} |            %% ws服务器的supervisor名称
-{maxSize, infinity | pos_integer()} |    %% 单次请求Content-Length的最大值 默认值 infinity
-{chunkedSupp, boolean()}.                %% 服务器是否运行客户端发送Transfer-Encoding 默认不运行 主要是为了防攻击
+{maxSize, infinity | pos_integer()} |    %% 单次请求Body最大值 默认8MB
+{maxRequestLineSize, pos_integer()} |    %% 请求行最大长度 默认8KB
+{maxHeaderSize, pos_integer()} |         %% 请求头总大小 默认64KB
+{maxWsFrameSize, pos_integer()} |        %% WebSocket单帧最大值 默认1MB
+{maxWsMessageSize, pos_integer()} |      %% WebSocket单消息最大值 默认8MB
+{chunkedSupp, boolean()}.                %% 服务器是否允许客户端发送Transfer-Encoding: chunked 默认false
 
 
 -record(wsReq, {
@@ -36,7 +40,7 @@ listenOpt() |                 %% eNet相关配置
 ]).
 
 -type wsReq() :: #wsReq{}.
--type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST'| 'PUT' | 'DELETE' | 'TRACE' | binary().
+-type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'TRACE' | binary().
 -type wsBody() :: binary() | iolist().
 -type wsPath() :: binary().
 -type wsHeader() :: {Key :: atom(), Value :: binary() | string()}.
