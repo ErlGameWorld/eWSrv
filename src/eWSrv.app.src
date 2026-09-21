@@ -3,7 +3,7 @@
       {vsn, "0.1.0"},
       {registered, []},
       {mod, {eWSrv_app, []}},
-      {applications, [kernel, stdlib, crypto, ssl, eNet]},
+      {applications, [kernel, stdlib, crypto, ssl, eNet, cowlib]},
       {env, []},
       {modules, []},
       {licenses, ["MIT"]},
