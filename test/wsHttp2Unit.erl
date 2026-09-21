@@ -677,3 +677,46 @@ decodeResponses([{frame, data, _Flags, Id, Payload} | Rest], Ctx, HMap, BMap, Pe
    decodeResponses(Rest, Ctx, HMap, BMap#{Id => [Payload | Parts]}, Pending);
 decodeResponses([_ | Rest], Ctx, HMap, BMap, Pending) ->
    decodeResponses(Rest, Ctx, HMap, BMap, Pending).
+
+
+%% RFC 7541 Appendix C interoperability vectors.
+huffman_rfc7541_vector_test() ->
+   Encoded = wsHuffman:encode(<<"www.example.com">>),
+   ?assertEqual(<<16#f1,16#e3,16#c2,16#e5,16#f2,16#3a,16#6b,16#a0,16#ab,16#90,16#f4,16#ff>>, Encoded),
+   ?assertEqual(<<"www.example.com">>, wsHuffman:decode(Encoded)).
+
+hpack_rfc7541_plain_request_vector_test() ->
+   Block = <<16#82,16#86,16#84,16#41,16#0f,"www.example.com">>,
+   {ok, Headers, _Ctx} = wsHpack:decode(Block, wsHpack:new()),
+   ?assertEqual([
+      {<<":method">>, <<"GET">>},
+      {<<":scheme">>, <<"http">>},
+      {<<":path">>, <<"/">>},
+      {<<":authority">>, <<"www.example.com">>}
+   ], Headers).
+
+hpack_rfc7541_huffman_request_vector_test() ->
+   Block = <<16#82,16#86,16#84,16#41,16#8c,
+      16#f1,16#e3,16#c2,16#e5,16#f2,16#3a,16#6b,16#a0,16#ab,16#90,16#f4,16#ff>>,
+   {ok, Headers, _Ctx} = wsHpack:decode(Block, wsHpack:new()),
+   ?assertEqual(<<"www.example.com">>,
+      proplists:get_value(<<":authority">>, Headers)).
+
+frame_parser_byte_by_byte_test() ->
+   Wire = iolist_to_binary([
+      wsHttp2Frame:settingsFrame([{initial_window_size, 70000}]),
+      wsHttp2Frame:pingFrame(<<"12345678">>)
+   ]),
+   {_Parser, Frames} = feedByteByByte(Wire, wsHttp2Frame:new(), []),
+   ?assertEqual(2, length(Frames)),
+   ?assertMatch({frame, settings, 0, 0, _}, hd(Frames)),
+   ?assertMatch({frame, ping, 0, 0, <<"12345678">>}, lists:nth(2, Frames)).
+
+settings_bad_length_test() ->
+   ?assertEqual({error, badSettingsLength}, wsHttp2Frame:settingsDecode(<<0,1,2>>)).
+
+feedByteByByte(<<>>, Parser, Acc) ->
+   {Parser, Acc};
+feedByteByByte(<<Byte, Rest/binary>>, Parser0, Acc0) ->
+   {Parser, Frames} = wsHttp2Frame:feed(Parser0, <<Byte>>),
+   feedByteByByte(Rest, Parser, Acc0 ++ Frames).
