@@ -265,6 +265,45 @@ multiplex() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+
+http2_slow_stream_does_not_block_fast_stream_test_() ->
+   {timeout, 20, fun slowDoesNotBlockFast/0}.
+
+slowDoesNotBlockFast() ->
+   Name = ws_http2_parallel_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      SlowHeaders = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/slow">>}
+      ],
+      {SlowBlock, Tx1} = wsHpack:encode(SlowHeaders, wsHpack:new()),
+      FastHeaders = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/two">>}
+      ],
+      {FastBlock, _Tx2} = wsHpack:encode(FastHeaders, Tx1),
+      ok = gen_tcp:send(Sock, [
+         wsHttp2Frame:headersFrames(SlowBlock, 1, 16384, true),
+         wsHttp2Frame:headersFrames(FastBlock, 3, 16384, true)
+      ]),
+      {Parser2, Frames1} = recvUntil(
+         fun(Fs) -> streamEnded(3, Fs) end, Sock, Parser1, [], 300),
+      ?assert(streamEnded(3, Frames1)),
+      ?assertNot(streamEnded(1, Frames1)),
+      {_Parser3, Frames2} = recvUntil(
+         fun(Fs) -> streamEnded(1, Fs) end, Sock, Parser2, Frames1, 2000),
+      {HMap, BMap} = decodeResponses(Frames2),
+      ?assertEqual(<<"two">>, maps:get(3, BMap)),
+      ?assertEqual(<<"slow">>, maps:get(1, BMap)),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(1, HMap))),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(3, HMap))),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_send_flow_control_integration_test_() ->
    {timeout, 20, fun sendFlowControl/0}.
 
