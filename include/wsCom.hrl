@@ -67,6 +67,9 @@
    , requestTimeout = ?DefRequestTimeout :: pos_integer()           %% 单个HTTP请求总超时
    , keepAliveTimeout = ?DefKeepAliveTimeout :: pos_integer()       %% 空闲Keep-Alive超时
    , requestStartedAt :: undefined | integer()                      %% 当前HTTP请求开始时间(monotonic ms)
+   , http2Enabled = true :: boolean()                               %% 是否启用HTTP/2
+   , protocol = detect :: detect | http1 | http2                    %% 当前连接线协议
+   , h2State :: undefined | map()                                   %% HTTP/2连接状态
 
    , is_behavior = false :: boolean()                         %% 是否是行为连接
    , fragmented = false :: boolean()                                %% websocket
