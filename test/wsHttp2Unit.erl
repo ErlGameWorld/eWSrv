@@ -267,6 +267,75 @@ multiplex() ->
 
 
 
+
+http2_request_body_timeout_test_() ->
+   {timeout, 20, fun requestBodyTimeout/0}.
+
+requestBodyTimeout() ->
+   {ok, _} = application:ensure_all_started(eWSrv),
+   Name = ws_http2_req_timeout_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {ok, _} = eWSrv:openSrv(Name, 0, [
+         {http2, true}, {wsMod, wsHttp2TestHandler},
+         {requestTimeout, 100}, {keepAliveTimeout, 5000}
+      ]),
+      ListenerName = ntCom:lsName(tcp, Name),
+      Port = ntTcpListener:getListenPort(ListenerName),
+      {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port,
+         [binary, {packet, raw}, {active, false}], 5000),
+      ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
+      {Parser1, _} = recvUntil(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+      Headers = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"10">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      %% Do not END_STREAM and do not send DATA: the stream must time out independently.
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, false)),
+      Pred = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, _Payload}) -> true;
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(Pred, Sock, Parser1, [], 2000),
+      ?assert(Pred(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_idle_goaway_test_() ->
+   {timeout, 20, fun idleGoaway/0}.
+
+idleGoaway() ->
+   {ok, _} = application:ensure_all_started(eWSrv),
+   Name = ws_http2_idle_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {ok, _} = eWSrv:openSrv(Name, 0, [
+         {http2, true}, {wsMod, wsHttp2TestHandler},
+         {keepAliveTimeout, 100}
+      ]),
+      ListenerName = ntCom:lsName(tcp, Name),
+      Port = ntTcpListener:getListenPort(ListenerName),
+      {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port,
+         [binary, {packet, raw}, {active, false}], 5000),
+      ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
+      {Parser1, _} = recvUntil(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+      Pred = fun(Fs) -> lists:any(fun
+         ({frame, goaway, _Flags, 0, _Payload}) -> true;
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(Pred, Sock, Parser1, [], 2000),
+      ?assert(Pred(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_compression_integration_test_() ->
    {timeout, 20, fun compression/0}.
 
