@@ -5,6 +5,7 @@
 -export([
    new/6, start/1, handleData/2,
    handleResponse/5, handleWorkerDown/3, handleRequestTimeout/3,
+   handleStreamStart/7, handleStreamChunk/7, handleStreamClose/4,
    hasOpenStreams/1, idleClose/1, terminate/1
 ]).
 
@@ -714,8 +715,7 @@ dispatchRequest(StreamId, State0) ->
          WsMod = maps:get(ws_mod, State0),
          Parent = self(),
          {Pid, MonitorRef} = spawn_monitor(fun() ->
-            Response = callHandler(WsMod, Req#wsReq.method, Req#wsReq.path, Req),
-            Parent ! {h2_response, StreamId, self(), Req, Response}
+            runHandlerWorker(Parent, StreamId, WsMod, Req)
          end),
          Stream1 = StreamA#{
             req => Req,
@@ -759,6 +759,175 @@ idleClose(State) ->
    Last = maps:get(last_client_stream, State, 0),
    _ = wsNet:send(maps:get(socket, State), wsHttp2Frame:goawayFrame(Last, no_error)),
    State#{goaway => true}.
+
+runHandlerWorker(Parent, StreamId, WsMod, Req) ->
+   Response = callHandler(WsMod, Req#wsReq.method, Req#wsReq.path, Req),
+   case Response of
+      {chunk, Headers, Initial} ->
+         Token = make_ref(),
+         Parent ! {h2_stream_start, StreamId, self(), Token, Req, Headers, Initial},
+         case waitChunkAck(Token) of
+            ok -> h2ChunkWorkerLoop(Parent, StreamId);
+            _ -> ok
+         end;
+      _ ->
+         Parent ! {h2_response, StreamId, self(), Req, Response}
+   end.
+
+h2ChunkWorkerLoop(Parent, StreamId) ->
+   receive
+      {chunk, close} ->
+         Parent ! {h2_stream_close, StreamId, self(), false};
+      {chunk, close, From} ->
+         Parent ! {h2_stream_close, StreamId, self(), From};
+      {chunk, Data} ->
+         Token = make_ref(),
+         Parent ! {h2_stream_chunk, StreamId, self(), Token, Data, false},
+         case waitChunkAck(Token) of
+            ok -> h2ChunkWorkerLoop(Parent, StreamId);
+            _ -> ok
+         end;
+      {chunk, Data, From} ->
+         Token = make_ref(),
+         Parent ! {h2_stream_chunk, StreamId, self(), Token, Data, From},
+         case waitChunkAck(Token) of
+            ok -> h2ChunkWorkerLoop(Parent, StreamId);
+            _ -> ok
+         end
+   end.
+
+waitChunkAck(Token) ->
+   receive
+      {h2_chunk_ack, Token, Result} -> Result
+   end.
+
+handleStreamStart(StreamId, WorkerPid, Token, Req, Headers0, Initial0, State0) ->
+   case getWorkerStream(StreamId, WorkerPid, State0) of
+      {error, State} ->
+         WorkerPid ! {h2_chunk_ack, Token, closed},
+         {ok, State};
+      {ok, Stream0, State} ->
+         Method = Req#wsReq.method,
+         Headers1 = normalizeResponseHeaders(Headers0, []),
+         Headers = lists:keydelete(<<"content-length">>, 1, Headers1),
+         H2Headers = [{<<":status">>, <<"200">>} | Headers],
+         Tx0 = maps:get(tx_hpack, State),
+         {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
+         HeadOnly = Method =:= 'HEAD',
+         HFrames = wsHttp2Frame:headersFrames(
+            Block, StreamId, maps:get(peer_max_frame, State), HeadOnly),
+         case wsNet:send(maps:get(socket, State), HFrames) of
+            {error, Reason} ->
+               WorkerPid ! {h2_chunk_ack, Token, {error, Reason}},
+               {stop, {socket_error, Reason}, State};
+            ok when HeadOnly ->
+               WorkerPid ! {h2_chunk_ack, Token, closed},
+               {ok, dropStream(StreamId, State#{tx_hpack => Tx})};
+            ok ->
+               Initial = iolist_to_binary(Initial0),
+               Stream1 = Stream0#{
+                  response_started => true,
+                  streaming => true,
+                  pending_send => <<>>,
+                  pending_end_stream => false,
+                  pending_ack => undefined
+               },
+               State1 = State#{
+                  tx_hpack => Tx,
+                  streams => (maps:get(streams, State))#{StreamId := Stream1}
+               },
+               case Initial of
+                  <<>> ->
+                     WorkerPid ! {h2_chunk_ack, Token, ok},
+                     {ok, State1};
+                  _ ->
+                     queueStreamChunk(StreamId, WorkerPid, Token, Initial, false, State1)
+               end
+         end
+   end.
+
+handleStreamChunk(StreamId, WorkerPid, Token, Data0, From, State0) ->
+   case getWorkerStream(StreamId, WorkerPid, State0) of
+      {error, State} ->
+         maybeReplyChunkFrom(From, {error, closed}),
+         WorkerPid ! {h2_chunk_ack, Token, closed},
+         {ok, State};
+      {ok, #{streaming := true, pending_send := <<>>}, State} ->
+         Data = iolist_to_binary(Data0),
+         case Data of
+            <<>> ->
+               maybeReplyChunkFrom(From, ok),
+               WorkerPid ! {h2_chunk_ack, Token, ok},
+               {ok, State};
+            _ ->
+               queueStreamChunk(StreamId, WorkerPid, Token, Data, From, State)
+         end;
+      {ok, _Stream, State} ->
+         maybeReplyChunkFrom(From, {error, busy}),
+         WorkerPid ! {h2_chunk_ack, Token, {error, busy}},
+         {ok, State}
+   end.
+
+handleStreamClose(StreamId, WorkerPid, From, State0) ->
+   case getWorkerStream(StreamId, WorkerPid, State0) of
+      {error, State} ->
+         maybeReplyChunkFrom(From, {error, closed}),
+         {ok, State};
+      {ok, #{streaming := true, pending_send := <<>>}, State} ->
+         Frame = wsHttp2Frame:frame(data, StreamId, <<>>, ?END_STREAM),
+         case wsNet:send(maps:get(socket, State), Frame) of
+            ok ->
+               maybeReplyChunkFrom(From, ok),
+               {ok, dropStream(StreamId, State)};
+            {error, Reason} ->
+               maybeReplyChunkFrom(From, {error, closed}),
+               {stop, {socket_error, Reason}, State}
+         end;
+      {ok, _Stream, State} ->
+         maybeReplyChunkFrom(From, {error, busy}),
+         {ok, State}
+   end.
+
+getWorkerStream(StreamId, WorkerPid, State) ->
+   case maps:get(StreamId, maps:get(streams, State), undefined) of
+      #{handler_pid := WorkerPid} = Stream -> {ok, Stream, State};
+      _ -> {error, State}
+   end.
+
+queueStreamChunk(StreamId, WorkerPid, Token, Data, From, State0) ->
+   Streams = maps:get(streams, State0),
+   Stream = maps:get(StreamId, Streams),
+   Stream1 = Stream#{
+      pending_send => Data,
+      pending_end_stream => false,
+      pending_ack => {WorkerPid, Token, From}
+   },
+   State1 = State0#{streams => Streams#{StreamId := Stream1}},
+   case flushPending(StreamId, State1) of
+      {ok, State2} -> {ok, State2};
+      {error, Code, Reason} -> connError(Code, Reason, State1)
+   end.
+
+completePendingAck(undefined, _Result) ->
+   ok;
+completePendingAck({WorkerPid, Token, From}, Result) ->
+   maybeReplyChunkFrom(From, Result),
+   WorkerPid ! {h2_chunk_ack, Token, Result},
+   ok.
+
+maybeReplyChunkFrom(false, _Result) ->
+   ok;
+maybeReplyChunkFrom(From, Result) when is_pid(From) ->
+   From ! {self(), Result},
+   ok;
+maybeReplyChunkFrom(_From, _Result) ->
+   ok.
+
+failStreamPendingAck(Stream) ->
+   case maps:get(pending_ack, Stream, undefined) of
+      undefined -> ok;
+      Ack -> completePendingAck(Ack, {error, closed})
+   end.
 
 %% @doc Apply a completed stream worker response in the owning connection process.
 %% HPACK encoder and flow-control state are connection-scoped, therefore only
@@ -816,10 +985,10 @@ callHandler(WsMod, Method, Path, Req) ->
          {response, HttpCode, Headers, Body};
       {HttpCode, Body} when is_integer(HttpCode) ->
          {response, HttpCode, [], Body};
-      {chunk, _Headers} ->
-         {response, 501, [], <<"HTTP/2 streaming callback not enabled">>};
-      {chunk, _Headers, _Initial} ->
-         {response, 501, [], <<"HTTP/2 streaming callback not enabled">>};
+      {chunk, Headers} ->
+         {chunk, Headers, <<>>};
+      {chunk, Headers, Initial} ->
+         {chunk, Headers, Initial};
       {wsUpgrade, _Headers} ->
          {response, 501, [], <<"WebSocket over HTTP/2 not enabled">>};
       Unexpected ->
