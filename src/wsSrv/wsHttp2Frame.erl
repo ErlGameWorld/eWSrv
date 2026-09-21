@@ -6,7 +6,7 @@
 %%% 职责边界：socket、stream 状态机与 flow control 决策都归连接进程
 %%% wsHttp2；本模块把 frame 编成字节、把字节解成 frame，不做任何 IO，
 %%% 也不维护连接状态（parser 只缓存不足一帧的字节）。DATA/HEADERS/
-%%% CONTINUATION 的负载原样透传——HPACK 在 wcHpack，stream 语义在
+%%% CONTINUATION 的负载原样透传——HPACK 在 wsHpack，stream 语义在
 %%% wsHttp2。
 %%%
 %%% frame 头布局（RFC 9113 4.1）：
@@ -14,7 +14,7 @@
 %%%   Length (24) | Type (8) | Flags (8) | R (1) | Stream Identifier (31)
 %%%
 %%% 解码是增量的：feed/2 返回已解出的完整 frame 以及未消费的字节前缀，
-%%% 与 wcHttp1 的解析器契约一致，便于上层统一按“喂字节、取事件”驱动。
+%%% 与 wsHttpProtocol 的解析器契约一致，便于上层统一按“喂字节、取事件”驱动。
 %%% @end
 %%%-------------------------------------------------------------------
 -module(wsHttp2Frame).
