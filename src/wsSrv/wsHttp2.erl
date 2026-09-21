@@ -1006,10 +1006,19 @@ requestFromHeaders(Headers, State) ->
          MethodBin = maps:get(<<":method">>, Pseudo, undefined),
          Protocol = maps:get(<<":protocol">>, Pseudo, undefined),
          case {MethodBin, Protocol} of
-            {undefined, _} -> {error, missing_method};
-            {_, P} when P =/= undefined -> {error, extended_connect_not_enabled};
-            _ ->
-               buildRequest(MethodBin, Pseudo, Regular, Seen, State)
+            {undefined, _} ->
+               {error, missing_method};
+            {Method, _} when not is_binary(Method); Method =:= <<>> ->
+               {error, invalid_method};
+            {Method, _} ->
+               case validMethod(Method) of
+                  false ->
+                     {error, invalid_method};
+                  true when Protocol =/= undefined ->
+                     {error, extended_connect_not_enabled};
+                  true ->
+                     buildRequest(Method, Pseudo, Regular, Seen, State)
+               end
          end
    end.
 
@@ -1107,18 +1116,42 @@ makeRequest(MethodBin, Pseudo, Regular, State) ->
       {error, _} = Error ->
          Error;
       {ok, Host, Port} ->
-         ContentLength = parseContentLengthHeaders(Regular),
+         CompatHeaders = ensureHostHeader(Regular, Authority),
+         ContentLength = parseContentLengthHeaders(CompatHeaders),
          case ContentLength of
             {error, _} = Error -> Error;
             N when is_integer(N) ->
                case exceeds(N, maps:get(max_body, State)) of
                   true -> {error, body_too_large};
-                  false -> makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, N, State)
+                  false -> makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, CompatHeaders, N, State)
                end;
             undefined ->
-               makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, undefined, State)
+               makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, CompatHeaders, undefined, State)
          end
    end.
+
+ensureHostHeader(Regular, undefined) ->
+   Regular;
+ensureHostHeader(Regular, Authority) ->
+   case lists:keyfind(<<"host">>, 1, Regular) of
+      false -> [{<<"host">>, Authority} | Regular];
+      _ -> Regular
+   end.
+
+validMethod(<<>>) -> false;
+validMethod(Bin) -> validMethodChars(Bin).
+
+validMethodChars(<<>>) -> true;
+validMethodChars(<<C, Rest/binary>>) when
+   (C >= $A andalso C =< $Z) orelse
+   (C >= $a andalso C =< $z) orelse
+   (C >= $0 andalso C =< $9) orelse
+   C =:= $! orelse C =:= $# orelse C =:= $$ orelse C =:= $% orelse
+   C =:= $& orelse C =:= $' orelse C =:= $* orelse C =:= $+ orelse
+   C =:= $- orelse C =:= $. orelse C =:= $^ orelse C =:= $_ orelse
+   C =:= $` orelse C =:= $| orelse C =:= $~ ->
+   validMethodChars(Rest);
+validMethodChars(_) -> false.
 
 makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, ContentLength, State) ->
    Req = #wsReq{
