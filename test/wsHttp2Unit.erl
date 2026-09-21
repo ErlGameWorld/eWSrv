@@ -720,3 +720,108 @@ feedByteByByte(<<>>, Parser, Acc) ->
 feedByteByByte(<<Byte, Rest/binary>>, Parser0, Acc0) ->
    {Parser, Frames} = wsHttp2Frame:feed(Parser0, <<Byte>>),
    feedByteByByte(Rest, Parser, Acc0 ++ Frames).
+
+
+%% ------------------------------------------------------------------
+%% Additional low-level regressions retained from the original feature/http2
+%% branch. These cover malformed HPACK inputs and pure frame helpers that are
+%% cheaper and more precise than the higher-level integration tests.
+%% ------------------------------------------------------------------
+
+frame_helper_roundtrip_test() ->
+   Io = [
+      wsHttp2Frame:settingsFrame([{max_concurrent_streams, 100}]),
+      wsHttp2Frame:pingFrame(<<"12345678">>),
+      wsHttp2Frame:windowUpdateFrame(0, 1024)
+   ],
+   {_Parser, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
+   ?assertMatch([
+      {frame, settings, 0, 0, _},
+      {frame, ping, 0, 0, <<"12345678">>},
+      {frame, window_update, 0, 0, _}
+   ], Frames).
+
+partial_frame_boundary_test() ->
+   Bin = iolist_to_binary(wsHttp2Frame:pingFrame(<<"abcdefgh">>)),
+   <<A:5/binary, B/binary>> = Bin,
+   {P1, []} = wsHttp2Frame:feed(wsHttp2Frame:new(), A),
+   {_P2, [{frame, ping, 0, 0, <<"abcdefgh">>}]} = wsHttp2Frame:feed(P1, B).
+
+headers_continuation_helper_test() ->
+   Block = binary:copy(<<"h">>, 100),
+   Io = wsHttp2Frame:headersFrames(Block, 1, 40),
+   {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
+   ?assertMatch([
+      {frame, headers, 0, 1, _},
+      {frame, continuation, 0, 1, _},
+      {frame, continuation, ?END_HEADERS, 1, _}
+   ], Frames).
+
+data_frames_end_stream_helper_test() ->
+   Body = binary:copy(<<"x">>, 40),
+   Io = wsHttp2Frame:dataFrames(Body, 3, 16),
+   {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
+   ?assertMatch([
+      {frame, data, 0, 3, _},
+      {frame, data, 0, 3, _},
+      {frame, data, ?END_STREAM, 3, _}
+   ], Frames).
+
+hpack_static_decode_regression_test() ->
+   {ok, [{<<":method">>, <<"GET">>}], _} =
+      wsHpack:decode(<<16#82>>, wsHpack:new()).
+
+hpack_dynamic_table_reuse_test() ->
+   H = [
+      {<<":method">>, <<"POST">>},
+      {<<":scheme">>, <<"https">>},
+      {<<":path">>, <<"/echo">>},
+      {<<":authority">>, <<"localhost">>},
+      {<<"content-type">>, <<"application/json">>},
+      {<<"x-long-header">>, <<"this value is intentionally compressible compressible compressible">>}
+   ],
+   {Enc1, E1} = wsHpack:encode(H, wsHpack:new()),
+   {ok, H, D1} = wsHpack:decode(iolist_to_binary(Enc1), wsHpack:new()),
+   {Enc2, _E2} = wsHpack:encode(H, E1),
+   {ok, H, _D2} = wsHpack:decode(iolist_to_binary(Enc2), D1),
+   ?assert(iolist_size(Enc2) < iolist_size(Enc1)).
+
+hpack_bad_index_regression_test() ->
+   ?assertEqual({error, badIndex}, wsHpack:decode(<<16#80>>, wsHpack:new())),
+   ?assertEqual({error, {badIndex, 137}},
+      wsHpack:decode(<<16#FF, 16#0A>>, wsHpack:new())).
+
+hpack_integer_too_long_regression_test() ->
+   Bad = <<16#FF, 16#80, 16#80, 16#80, 16#80, 16#80>>,
+   ?assertEqual({error, integerTooLong}, wsHpack:decode(Bad, wsHpack:new())).
+
+hpack_size_update_position_regression_test() ->
+   Ctx = wsHpack:new(4096),
+   ?assertEqual({error, sizeUpdateNotAtStart},
+      wsHpack:decode(<<16#82, 16#20>>, Ctx)),
+   ?assertMatch({ok, [{<<":method">>, <<"GET">>}], _},
+      wsHpack:decode(<<16#20, 16#82>>, Ctx)).
+
+hpack_bad_table_size_regression_test() ->
+   ?assertEqual({error, {badTableSize, 8192}},
+      wsHpack:decode(<<16#3F, 16#E1, 16#3F>>, wsHpack:new(4096))).
+
+hpack_incomplete_regression_test() ->
+   ?assertEqual({error, incomplete},
+      wsHpack:decode(<<16#40, 16#03, $a>>, wsHpack:new())),
+   ?assertEqual({error, incomplete},
+      wsHpack:decode(<<16#40>>, wsHpack:new())).
+
+hpack_bad_huffman_regression_test() ->
+   ?assertEqual({error, badHuffman},
+      wsHpack:decode(<<16#40, 16#81, 16#FF>>, wsHpack:new())).
+
+window_update_validation_regression_test() ->
+   ?assertEqual({ok, 1}, wsHttp2Frame:windowUpdateIncrement(<<0:1, 1:31>>)),
+   ?assertEqual({error, zeroIncrement},
+      wsHttp2Frame:windowUpdateIncrement(<<0:1, 0:31>>)).
+
+ping_size_validation_regression_test() ->
+   ?assertEqual({ok, <<"12345678">>},
+      wsHttp2Frame:pingData(<<"12345678">>)),
+   ?assertEqual({error, badPing}, wsHttp2Frame:pingData(<<"short">>)).
