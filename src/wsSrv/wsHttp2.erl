@@ -797,24 +797,28 @@ parseHeaderList([{Name0, Value0} | Rest], Pseudo, Regular, Phase, Seen) ->
    Name = toBinary(Name0),
    Value = toBinary(Value0),
    case Name =:= wsUtil:toLowerStr(Name) of
-      false -> {error, uppercase_header_name};
-      true when Name =:= <<>> ->
-         {error, empty_header_name};
-      true when not validHeaderValue(Value) ->
-         {error, invalid_header_value};
+      false ->
+         {error, uppercase_header_name};
       true ->
-         case Name of
-            <<":", _/binary>> when Phase =:= regular ->
-               {error, pseudo_header_after_regular};
-            <<":", _/binary>> ->
-               case allowedRequestPseudo(Name) andalso not maps:is_key(Name, Seen) of
-                  false -> {error, {bad_pseudo_header, Name}};
-                  true -> parseHeaderList(Rest, Pseudo#{Name => Value}, Regular, pseudo, Seen#{Name => true})
-               end;
-            _ ->
-               case validRegularHeader(Name, Value) of
-                  false -> {error, {bad_header, Name}};
-                  true -> parseHeaderList(Rest, Pseudo, [{Name, Value} | Regular], regular, Seen)
+         case {Name, validHeaderValue(Value)} of
+            {<<>>, _} ->
+               {error, empty_header_name};
+            {_, false} ->
+               {error, invalid_header_value};
+            {_, true} ->
+               case Name of
+                  <<":", _/binary>> when Phase =:= regular ->
+                     {error, pseudo_header_after_regular};
+                  <<":", _/binary>> ->
+                     case allowedRequestPseudo(Name) andalso not maps:is_key(Name, Seen) of
+                        false -> {error, {bad_pseudo_header, Name}};
+                        true -> parseHeaderList(Rest, Pseudo#{Name => Value}, Regular, pseudo, Seen#{Name => true})
+                     end;
+                  _ ->
+                     case validRegularHeader(Name, Value) of
+                        false -> {error, {bad_header, Name}};
+                        true -> parseHeaderList(Rest, Pseudo, [{Name, Value} | Regular], regular, Seen)
+                     end
                end
          end
    end.
