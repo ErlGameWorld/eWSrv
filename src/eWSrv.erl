@@ -45,8 +45,9 @@ openSrv(Port, WsOpts) ->
    MaxWsFrameSize = ?wsGLV(maxWsFrameSize, WsOpts, ?DefMaxWsFrameSize),
    MaxWsMessageSize = ?wsGLV(maxWsMessageSize, WsOpts, ?DefMaxWsMessageSize),
    ChunkedSupp = ?wsGLV(chunkedSupp, WsOpts, false),
+   Http2 = ?wsGLV(http2, WsOpts, true),
    WsSupName = ?wsGLV(wsSupName, WsOpts, undefined),
-   ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize, MaxWsFrameSize, MaxWsMessageSize},
+   ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize, MaxWsFrameSize, MaxWsMessageSize, Http2},
    T2WsOpts = lists:keystore(conArgs, 1, T1WsOpts, {conArgs, ConArgs}),
    TcpOpts = ?wsGLV(tcpOpts, T2WsOpts, []),
    NewTcpOpts = wsUtil:mergeOpts(?DefWsOpts, TcpOpts),
@@ -56,8 +57,10 @@ openSrv(Port, WsOpts) ->
    case ?wsGLV(sslOpts, WsOpts, false) of
       false ->
          {ok, _} = eNet:openTcp(WSrvName, Port, LWsOpts);
-      _ ->
-         {ok, _} = eNet:openSsl(WSrvName, Port, LWsOpts)
+      SslOpts ->
+         HSslOpts = http2SslOpts(Http2, SslOpts),
+         SrvOpts = lists:keystore(sslOpts, 1, LWsOpts, {sslOpts, HSslOpts}),
+         {ok, _} = eNet:openSsl(WSrvName, Port, SrvOpts)
    end.
 
 openSrv(WSrvName, Port, WsOpts) ->
@@ -69,8 +72,9 @@ openSrv(WSrvName, Port, WsOpts) ->
    MaxWsFrameSize = ?wsGLV(maxWsFrameSize, WsOpts, ?DefMaxWsFrameSize),
    MaxWsMessageSize = ?wsGLV(maxWsMessageSize, WsOpts, ?DefMaxWsMessageSize),
    ChunkedSupp = ?wsGLV(chunkedSupp, WsOpts, false),
+   Http2 = ?wsGLV(http2, WsOpts, true),
    WsSupName = ?wsGLV(wsSupName, WsOpts, undefined),
-   ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize, MaxWsFrameSize, MaxWsMessageSize},
+   ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize, MaxWsFrameSize, MaxWsMessageSize, Http2},
    T2WsOpts = lists:keystore(conArgs, 1, T1WsOpts, {conArgs, ConArgs}),
    TcpOpts = ?wsGLV(tcpOpts, T2WsOpts, []),
    NewTcpOpts = wsUtil:mergeOpts(?DefWsOpts, TcpOpts),
@@ -79,9 +83,17 @@ openSrv(WSrvName, Port, WsOpts) ->
    case ?wsGLV(sslOpts, WsOpts, false) of
       false ->
          {ok, _} = eNet:openTcp(WSrvName, Port, LWsOpts);
-      _ ->
-         {ok, _} = eNet:openSsl(WSrvName, Port, LWsOpts)
+      SslOpts ->
+         HSslOpts = http2SslOpts(Http2, SslOpts),
+         SrvOpts = lists:keystore(sslOpts, 1, LWsOpts, {sslOpts, HSslOpts}),
+         {ok, _} = eNet:openSsl(WSrvName, Port, SrvOpts)
    end.
+
+http2SslOpts(false, SslOpts) ->
+   SslOpts;
+http2SslOpts(true, SslOpts) when is_list(SslOpts) ->
+   lists:keystore(alpn_preferred_protocols, 1, SslOpts,
+      {alpn_preferred_protocols, [<<"h2">>, <<"http/1.1">>]}).
 
 closeSrv(WSrvNameOrPort) ->
    WSrvName = ?CASE(is_integer(WSrvNameOrPort), wSrvName(WSrvNameOrPort), WSrvNameOrPort),
