@@ -107,6 +107,8 @@ handleLoopTimeout(#wsState{socket = Socket} = State) ->
 
 loopTimeout(#wsState{stage = wsWs}) ->
    infinity;
+loopTimeout(#wsState{protocol = http2, keepAliveTimeout = Timeout}) ->
+   Timeout;
 loopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined,
    keepAliveTimeout = Timeout}) ->
    Timeout;
@@ -202,28 +204,29 @@ innerError(_CurState, Error, Class, Reason, Strace) ->
 %% ************************************************  API ***************************************************************
 init(Args) ->
    case Args of
-      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, false, undefined)};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage}} ->
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2}} ->
          case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, true, WebState)};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end;
       %% 兼容旧版eNet传入的4元组连接参数。
       {undefined, WsMod, MaxSize, ChunkedSupp} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, undefined)};
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, false, undefined)};
       {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
          case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, true, WebState)};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end
    end.
 
-newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, IsBehavior, WebState) ->
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, IsBehavior, WebState) ->
+   Protocol = case Http2 of true -> detect; false -> http1 end,
    #wsState{
       wsMod = WsMod,
       maxSize = MaxSize,
@@ -232,6 +235,8 @@ newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, Max
       maxHeaderSize = MaxHeader,
       maxWsFrameSize = MaxWsFrame,
       maxWsMessageSize = MaxWsMessage,
+      http2Enabled = Http2,
+      protocol = Protocol,
       is_behavior = IsBehavior,
       webState = WebState
    }.
@@ -242,6 +247,10 @@ maybeInitHandler(WsMod, Args) ->
       false -> {ok, undefined}
    end.
 
+handleMsg({tcp, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
+   handleHttp2Data(Data, H2, State);
+handleMsg({tcp, _Socket, Data}, #wsState{protocol = detect, http2Enabled = true} = State) ->
+   detectCleartextProtocol(Data, State);
 handleMsg({tcp, _Socket, Data}, State0) ->
    State = ensureRequestStarted(State0),
    #wsState{stage = Stage, socket = Socket} = State,
@@ -298,6 +307,8 @@ handleMsg({tcp_passive, Socket}, _State) ->
    wsNet:setopts(Socket, [{active, ?ActionN}]),
    kpS;
 
+handleMsg({ssl, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
+   handleHttp2Data(Data, H2, State);
 handleMsg({ssl, _Socket, Data}, State0) ->
    State = ensureRequestStarted(State0),
    #wsState{stage = Stage, socket = Socket} = State,
@@ -359,7 +370,7 @@ handleMsg({?mSockReady, Socket, SslOpts, SslHSTet}, State) ->
    case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
       {ok, SslSock} ->
          ssl:setopts(SslSock, [{packet, raw}, {active, ?ActionN}]),
-         {ok, State#wsState{socket = SslSock, isSsl = true}};
+         sslProtocolState(SslSock, State#wsState{socket = SslSock, isSsl = true});
       _Err ->
          ?wsErr("ssl handshake error ~p~n", [_Err]),
          {stop, handshake_error}
@@ -378,6 +389,60 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
       _ ->
          ?wsErr("~p info receive unexpect msg ~p ~n ", [?MODULE, Msg]),
          kpS
+   end.
+
+detectCleartextProtocol(Data, #wsState{buffer = Buffer} = State) ->
+   All = <<Buffer/binary, Data/binary>>,
+   Preface = <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>,
+   CheckLen = erlang:min(byte_size(All), byte_size(Preface)),
+   Prefix = binary:part(Preface, 0, CheckLen),
+   case binary:part(All, 0, CheckLen) =:= Prefix of
+      false ->
+         %% 不是HTTP/2 prior-knowledge，完整交回HTTP/1 parser。
+         handleMsg({tcp, State#wsState.socket, All},
+            State#wsState{protocol = http1, buffer = <<>>});
+      true when byte_size(All) < byte_size(Preface) ->
+         {ok, State#wsState{buffer = All}};
+      true ->
+         case startHttp2(State#wsState{buffer = <<>>}, http) of
+            {ok, H2State, NState} -> handleHttp2Data(All, H2State, NState);
+            {error, Reason} -> {stop, {http2_start, Reason}}
+         end
+   end.
+
+sslProtocolState(SslSock, #wsState{http2Enabled = true} = State) ->
+   case ssl:negotiated_protocol(SslSock) of
+      {ok, <<"h2">>} ->
+         case startHttp2(State, https) of
+            {ok, _H2, NState} -> {ok, NState};
+            {error, Reason} -> {stop, {http2_start, Reason}}
+         end;
+      _ ->
+         {ok, State#wsState{protocol = http1}}
+   end;
+sslProtocolState(_SslSock, State) ->
+   {ok, State#wsState{protocol = http1}}.
+
+startHttp2(#wsState{socket = Socket, wsMod = WsMod, maxSize = MaxBody,
+   maxHeaderSize = MaxHeader} = State, Scheme) ->
+   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader),
+   case wsHttp2:start(H20) of
+      {ok, H2} ->
+         NState = State#wsState{
+            protocol = http2,
+            h2State = H2,
+            requestStartedAt = undefined,
+            buffer = <<>>
+         },
+         {ok, H2, NState};
+      {error, Reason} ->
+         {error, Reason}
+   end.
+
+handleHttp2Data(Data, H2, State) ->
+   case wsHttp2:handleData(Data, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
    end.
 
 maybeSendWsClose(#wsState{stage = wsWs}, normal) ->
