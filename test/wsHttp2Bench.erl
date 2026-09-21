@@ -18,16 +18,20 @@ run() ->
    run(#{
       requests => 10000,
       concurrency => 32,
+      warmup => 1000,
       path => <<"/one">>,
-      max_body => 8 * 1024 * 1024
+      max_body => 8 * 1024 * 1024,
+      quiet => false
    }).
 
 run(Opts) when is_map(Opts) ->
    Requests = maps:get(requests, Opts, 10000),
    Concurrency0 = maps:get(concurrency, Opts, 32),
    Concurrency = erlang:max(1, erlang:min(100, Concurrency0)),
+   Warmup = maps:get(warmup, Opts, 1000),
    Path = maps:get(path, Opts, <<"/one">>),
    MaxBody = maps:get(max_body, Opts, 8 * 1024 * 1024),
+   Quiet = maps:get(quiet, Opts, false),
    true = is_integer(Requests) andalso Requests > 0,
 
    {ok, _} = application:ensure_all_started(eWSrv),
@@ -46,9 +50,15 @@ run(Opts) when is_map(Opts) ->
          [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
 
       {Parser0, _ServerFrames} = handshake(Sock),
+
+      %% Warm-up uses the same connection/HPACK contexts, but timings are discarded.
+      {Parser1, Tx1, NextId1, _} =
+         benchBatches(Sock, Parser0, wsHpack:new(), 1,
+            Warmup, Concurrency, Path, []),
+
       StartUs = erlang:monotonic_time(microsecond),
       {Parser, _Tx, _NextId, LatUs} =
-         benchBatches(Sock, Parser0, wsHpack:new(), 1,
+         benchBatches(Sock, Parser1, Tx1, NextId1,
             Requests, Concurrency, Path, []),
       _ = Parser,
       TotalUs = erlang:monotonic_time(microsecond) - StartUs,
@@ -56,8 +66,12 @@ run(Opts) when is_map(Opts) ->
 
       Sorted = lists:sort(LatUs),
       Result = #{
+         protocol => http2,
          requests => Requests,
          concurrency => Concurrency,
+         streams => Concurrency,
+         connections => 1,
+         warmup => Warmup,
          total_ms => TotalUs / 1000,
          requests_per_sec => Requests * 1000000 / erlang:max(1, TotalUs),
          latency_avg_ms => avg(Sorted) / 1000,
@@ -65,7 +79,7 @@ run(Opts) when is_map(Opts) ->
          latency_p95_ms => percentile(Sorted, 0.95) / 1000,
          latency_p99_ms => percentile(Sorted, 0.99) / 1000
       },
-      printResult(Result),
+      Quiet orelse printResult(Result),
       Result
    after
       _ = catch eWSrv:closeSrv(Name)
@@ -160,6 +174,8 @@ printResult(R) ->
       "~n=== eWSrv HTTP/2 local benchmark ===~n"
       "requests       : ~p~n"
       "concurrency    : ~p streams~n"
+      "connections    : 1~n"
+      "warmup         : ~p~n"
       "total          : ~.2f ms~n"
       "throughput     : ~.2f req/s~n"
       "latency avg    : ~.3f ms~n"
@@ -169,6 +185,7 @@ printResult(R) ->
       [
          maps:get(requests, R),
          maps:get(concurrency, R),
+         maps:get(warmup, R),
          maps:get(total_ms, R),
          maps:get(requests_per_sec, R),
          maps:get(latency_avg_ms, R),
