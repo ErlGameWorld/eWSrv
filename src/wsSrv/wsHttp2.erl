@@ -457,7 +457,7 @@ finishTrailers(StreamId, EndStream, Headers, Rest, State0) ->
                      applyFrames(Rest, State0);
                   Stream ->
                      Req0 = maps:get(req, Stream),
-                     Req = Req0#wsReq{headers = Req0#wsReq.headers ++ Headers},
+                     Req = Req0#wsReq{headers = Req0#wsReq.headers ++ internalHeaders(Headers)},
                      Stream1 = Stream#{req => Req},
                      State1 = State0#{streams => Streams#{StreamId := Stream1}},
                      case validateRequestLength(Stream1) of
@@ -872,7 +872,7 @@ makeRequest(MethodBin, Pseudo, Regular, State) ->
             port = Port,
             socket = maps:get(socket, State),
             args = Args,
-            headers = Regular
+            headers = internalHeaders(Regular)
          },
          {ok, Req, ContentLength}
    end.
@@ -940,6 +940,59 @@ validateTrailerHeaders(Headers) ->
       true -> {error, invalid_trailer};
       false -> ok
    end.
+
+internalHeaders(Headers) ->
+   [{internalHeaderName(Name), Value} || {Name, Value} <- Headers].
+
+%% 与 erlang:decode_packet(httph_bin, ...) 的常用标准Header键保持一致，
+%% 这样同一个WsMod无需区分HTTP/1.1与HTTP/2。
+internalHeaderName(<<"cache-control">>) -> 'Cache-Control';
+internalHeaderName(<<"date">>) -> 'Date';
+internalHeaderName(<<"pragma">>) -> 'Pragma';
+internalHeaderName(<<"via">>) -> 'Via';
+internalHeaderName(<<"accept">>) -> 'Accept';
+internalHeaderName(<<"accept-charset">>) -> 'Accept-Charset';
+internalHeaderName(<<"accept-encoding">>) -> 'Accept-Encoding';
+internalHeaderName(<<"accept-language">>) -> 'Accept-Language';
+internalHeaderName(<<"authorization">>) -> 'Authorization';
+internalHeaderName(<<"from">>) -> 'From';
+internalHeaderName(<<"host">>) -> 'Host';
+internalHeaderName(<<"if-modified-since">>) -> 'If-Modified-Since';
+internalHeaderName(<<"if-match">>) -> 'If-Match';
+internalHeaderName(<<"if-none-match">>) -> 'If-None-Match';
+internalHeaderName(<<"if-range">>) -> 'If-Range';
+internalHeaderName(<<"if-unmodified-since">>) -> 'If-Unmodified-Since';
+internalHeaderName(<<"max-forwards">>) -> 'Max-Forwards';
+internalHeaderName(<<"proxy-authorization">>) -> 'Proxy-Authorization';
+internalHeaderName(<<"range">>) -> 'Range';
+internalHeaderName(<<"referer">>) -> 'Referer';
+internalHeaderName(<<"user-agent">>) -> 'User-Agent';
+internalHeaderName(<<"age">>) -> 'Age';
+internalHeaderName(<<"location">>) -> 'Location';
+internalHeaderName(<<"proxy-authenticate">>) -> 'Proxy-Authenticate';
+internalHeaderName(<<"retry-after">>) -> 'Retry-After';
+internalHeaderName(<<"server">>) -> 'Server';
+internalHeaderName(<<"vary">>) -> 'Vary';
+internalHeaderName(<<"warning">>) -> 'Warning';
+internalHeaderName(<<"www-authenticate">>) -> 'Www-Authenticate';
+internalHeaderName(<<"allow">>) -> 'Allow';
+internalHeaderName(<<"content-base">>) -> 'Content-Base';
+internalHeaderName(<<"content-encoding">>) -> 'Content-Encoding';
+internalHeaderName(<<"content-language">>) -> 'Content-Language';
+internalHeaderName(<<"content-length">>) -> 'Content-Length';
+internalHeaderName(<<"content-location">>) -> 'Content-Location';
+internalHeaderName(<<"content-md5">>) -> 'Content-Md5';
+internalHeaderName(<<"content-range">>) -> 'Content-Range';
+internalHeaderName(<<"content-type">>) -> 'Content-Type';
+internalHeaderName(<<"etag">>) -> 'Etag';
+internalHeaderName(<<"expires">>) -> 'Expires';
+internalHeaderName(<<"last-modified">>) -> 'Last-Modified';
+internalHeaderName(<<"accept-ranges">>) -> 'Accept-Ranges';
+internalHeaderName(<<"set-cookie">>) -> 'Set-Cookie';
+internalHeaderName(<<"cookie">>) -> 'Cookie';
+internalHeaderName(<<"origin">>) -> 'Origin';
+internalHeaderName(<<"te">>) -> 'TE';
+internalHeaderName(Name) -> Name.
 
 headerValue(Name, Headers, Default) ->
    case lists:keyfind(Name, 1, Headers) of
