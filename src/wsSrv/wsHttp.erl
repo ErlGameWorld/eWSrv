@@ -102,14 +102,22 @@ handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = un
    terminate(normal, State);
 handleLoopTimeout(#wsState{stage = wsWs} = State) ->
    loop(self(), State);
+handleLoopTimeout(#wsState{protocol = http2, h2State = H2} = State) when is_map(H2) ->
+   _ = wsHttp2:idleClose(H2),
+   terminate(normal, State);
 handleLoopTimeout(#wsState{socket = Socket} = State) ->
-   catch sendRescueResponse(Socket, 408, <<"Request Timeout">>),
+   try sendRescueResponse(Socket, 408, <<"Request Timeout">>)
+   catch _:_ -> ok
+   end,
    terminate(timeout, State).
 
 loopTimeout(#wsState{stage = wsWs}) ->
    infinity;
-loopTimeout(#wsState{protocol = http2, keepAliveTimeout = Timeout}) ->
-   Timeout;
+loopTimeout(#wsState{protocol = http2, h2State = H2, keepAliveTimeout = Timeout}) ->
+   case is_map(H2) andalso wsHttp2:hasOpenStreams(H2) of
+      true -> infinity;
+      false -> Timeout
+   end;
 loopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined,
    keepAliveTimeout = Timeout}) ->
    Timeout;
@@ -299,6 +307,12 @@ handleMsg({tcp, _Socket, Data}, State0) ->
                {stop, Err}
          end
    end;
+handleMsg({h2_request_timeout, StreamId, Token},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleRequestTimeout(StreamId, Token, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
 handleMsg({h2_response, StreamId, WorkerPid, Req, Response},
    #wsState{protocol = http2, h2State = H2} = State) ->
    case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
@@ -438,7 +452,7 @@ sslProtocolState(_SslSock, State) ->
 
 startHttp2(#wsState{socket = Socket, wsMod = WsMod, maxSize = MaxBody,
    maxHeaderSize = MaxHeader} = State, Scheme) ->
-   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader),
+   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout),
    case wsHttp2:start(H20) of
       {ok, H2} ->
          NState = State#wsState{
@@ -468,7 +482,9 @@ maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
          invalid_utf8 -> 1007;
          _ -> 1002
       end,
-   catch wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>),
+   try wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>)
+   catch _:_ -> ok
+   end,
    ok;
 maybeSendWsClose(_State, _Reason) ->
    ok.
@@ -477,7 +493,9 @@ terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState,
    is_behavior = IsBehavior, protocol = Protocol, h2State = H2State} = _State) ->
    case {Protocol, H2State} of
       {http2, H2} when is_map(H2) ->
-         catch wsHttp2:terminate(H2);
+         try wsHttp2:terminate(H2)
+         catch _:_ -> ok
+         end;
       _ ->
          ok
    end,
