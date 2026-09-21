@@ -794,6 +794,10 @@ parseHeaderList([{Name0, Value0} | Rest], Pseudo, Regular, Phase, Seen) ->
    Value = toBinary(Value0),
    case Name =:= wsUtil:toLowerStr(Name) of
       false -> {error, uppercase_header_name};
+      true when Name =:= <<>> ->
+         {error, empty_header_name};
+      true when not validHeaderValue(Value) ->
+         {error, invalid_header_value};
       true ->
          case Name of
             <<":", _/binary>> when Phase =:= regular ->
@@ -821,9 +825,15 @@ allowedRequestPseudo(_) -> false.
 validRegularHeader(Name, Value) ->
    case isHopByHop(Name) of
       true -> false;
-      false when Name =:= <<"te">> -> wsUtil:toLowerStr(Value) =:= <<"trailers">>;
-      false -> true
+      false when Name =:= <<"te">> ->
+         wsUtil:toLowerStr(string:trim(Value)) =:= <<"trailers">>;
+      false -> validHeaderValue(Value)
    end.
+
+validHeaderValue(Value) ->
+   binary:match(Value, <<"\r">>) =:= nomatch andalso
+   binary:match(Value, <<"\n">>) =:= nomatch andalso
+   binary:match(Value, <<0>>) =:= nomatch.
 
 isHopByHop(<<"connection">>) -> true;
 isHopByHop(<<"proxy-connection">>) -> true;
@@ -846,7 +856,14 @@ buildRequest(MethodBin, Pseudo, Regular, _Seen, State) ->
       {undefined, _} -> {error, missing_scheme};
       {_, undefined} -> {error, missing_path};
       {_Scheme, <<>>} -> {error, empty_path};
-      _ -> makeRequest(MethodBin, Pseudo, Regular, State)
+      {_Scheme, <<"*">>} when MethodBin =:= <<"OPTIONS">> ->
+         makeRequest(MethodBin, Pseudo, Regular, State);
+      {_Scheme, <<"*">>} ->
+         {error, asterisk_path_requires_options};
+      {_Scheme, <<"/", _/binary>>} ->
+         makeRequest(MethodBin, Pseudo, Regular, State);
+      _ ->
+         {error, invalid_path}
    end.
 
 makeRequest(MethodBin, Pseudo, Regular, State) ->
@@ -854,28 +871,38 @@ makeRequest(MethodBin, Pseudo, Regular, State) ->
    {Path, Args} = splitPathQuery(PathQuery),
    SchemeBin = maps:get(<<":scheme">>, Pseudo,
       case maps:get(scheme, State) of https -> <<"https">>; _ -> <<"http">> end),
-   Authority = case maps:get(<<":authority">>, Pseudo, undefined) of
-      undefined -> headerValue(<<"host">>, Regular, undefined);
-      A -> A
-   end,
-   {Host, Port} = parseAuthority(Authority, SchemeBin),
-   ContentLength = parseContentLengthHeaders(Regular),
-   case ContentLength of
-      {error, _} = Error -> Error;
-      _ ->
-         Req = #wsReq{
-            method = methodValue(MethodBin),
-            path = Path,
-            version = {2, 0},
-            scheme = SchemeBin,
-            host = Host,
-            port = Port,
-            socket = maps:get(socket, State),
-            args = Args,
-            headers = internalHeaders(Regular)
-         },
-         {ok, Req, ContentLength}
+   Authority = maps:get(<<":authority">>, Pseudo, undefined),
+   HostHeader = headerValue(<<"host">>, Regular, undefined),
+   case validateAuthority(Authority, HostHeader, SchemeBin) of
+      {error, _} = Error ->
+         Error;
+      {ok, Host, Port} ->
+         ContentLength = parseContentLengthHeaders(Regular),
+         case ContentLength of
+            {error, _} = Error -> Error;
+            N when is_integer(N) ->
+               case exceeds(N, maps:get(max_body, State)) of
+                  true -> {error, body_too_large};
+                  false -> makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, N, State)
+               end;
+            undefined ->
+               makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, undefined, State)
+         end
    end.
+
+makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, ContentLength, State) ->
+   Req = #wsReq{
+      method = methodValue(MethodBin),
+      path = Path,
+      version = {2, 0},
+      scheme = SchemeBin,
+      host = Host,
+      port = Port,
+      socket = maps:get(socket, State),
+      args = Args,
+      headers = internalHeaders(Regular)
+   },
+   {ok, Req, ContentLength}.
 
 splitPathQuery(<<"*">>) -> {<<"*">>, []};
 splitPathQuery(<<>>) -> {<<>>, []};
@@ -887,34 +914,61 @@ splitPathQuery(PathQuery) ->
          {Path, Args}
    end.
 
-parseAuthority(undefined, Scheme) ->
-   {undefined, defaultPort(Scheme)};
-parseAuthority(<<"[", Rest/binary>>, Scheme) ->
-   case binary:match(Rest, <<"]">>) of
-      nomatch -> {undefined, defaultPort(Scheme)};
-      {Pos, 1} ->
-         <<Host:Pos/binary, "]", Tail/binary>> = Rest,
-         Port = case Tail of
-            <<":", P/binary>> -> parsePort(P, defaultPort(Scheme));
-            _ -> defaultPort(Scheme)
-         end,
-         {Host, Port}
-   end;
-parseAuthority(Authority, Scheme) ->
-   case binary:split(Authority, <<":">>, [global]) of
-      [Host] -> {Host, defaultPort(Scheme)};
-      [Host, P] -> {Host, parsePort(P, defaultPort(Scheme))};
-      _ -> {Authority, defaultPort(Scheme)}
+validateAuthority(Authority, HostHeader, Scheme) ->
+   case {Authority, HostHeader} of
+      {undefined, undefined} ->
+         {ok, undefined, defaultPort(Scheme)};
+      {undefined, HostValue} ->
+         parseAuthority(HostValue, Scheme);
+      {AuthValue, undefined} ->
+         parseAuthority(AuthValue, Scheme);
+      {AuthValue, HostValue} ->
+         case wsUtil:toLowerStr(AuthValue) =:= wsUtil:toLowerStr(HostValue) of
+            false -> {error, authority_host_mismatch};
+            true -> parseAuthority(AuthValue, Scheme)
+         end
    end.
 
-parsePort(P, Default) ->
+parseAuthority(undefined, Scheme) ->
+   {ok, undefined, defaultPort(Scheme)};
+parseAuthority(<<"[", Rest/binary>>, Scheme) ->
+   case binary:match(Rest, <<"]">>) of
+      nomatch -> {error, invalid_authority};
+      {Pos, 1} ->
+         <<Host:Pos/binary, "]", Tail/binary>> = Rest,
+         case {Host, Tail} of
+            {<<>>, _} -> {error, invalid_authority};
+            {_, <<>>} -> {ok, Host, defaultPort(Scheme)};
+            {_, <<":", P/binary>>} ->
+               case parsePort(P) of
+                  {ok, Port} -> {ok, Host, Port};
+                  error -> {error, invalid_authority_port}
+               end;
+            _ -> {error, invalid_authority}
+         end
+   end;
+parseAuthority(Authority, Scheme) when is_binary(Authority), Authority =/= <<>> ->
+   case binary:split(Authority, <<":">>, [global]) of
+      [Host] when Host =/= <<>> -> {ok, Host, defaultPort(Scheme)};
+      [Host, P] when Host =/= <<>> ->
+         case parsePort(P) of
+            {ok, Port} -> {ok, Host, Port};
+            error -> {error, invalid_authority_port}
+         end;
+      _ -> {error, invalid_authority}
+   end;
+parseAuthority(_, _) ->
+   {error, invalid_authority}.
+
+parsePort(P) ->
    try
       N = binary_to_integer(P),
-      case N >= 1 andalso N =< 65535 of true -> N; false -> Default end
-   catch _:_ -> Default end.
+      case N >= 1 andalso N =< 65535 of true -> {ok, N}; false -> error end
+   catch _:_ -> error end.
 
 defaultPort(<<"https">>) -> 443;
-defaultPort(_) -> 80.
+defaultPort(<<"http">>) -> 80;
+defaultPort(_) -> undefined.
 
 parseContentLengthHeaders(Headers) ->
    Values = [V || {<<"content-length">>, V} <- Headers],
