@@ -1,0 +1,32 @@
+name: OTP 29 CI
+
+on:
+  push:
+    branches:
+      - main
+      - audit/**
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Erlang/OTP and rebar3
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          rebar3-version: 'latest'
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: EUnit
+        run: rebar3 eunit
