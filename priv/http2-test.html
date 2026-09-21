@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>eWSrv HTTP/2 专项测试</title>
+<style>
+:root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e8edf7;background:#0b1020}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(140deg,#0b1020,#111936 55%,#19224a);min-height:100vh}
+main{max-width:1280px;margin:auto;padding:24px}.hero{display:flex;gap:18px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;margin-bottom:20px}
+h1{margin:0 0 8px;font-size:2rem}.sub{color:#aeb9d4}.badge{display:inline-block;padding:5px 10px;border-radius:999px;background:#263464;margin-right:6px}
+.ok{background:#164e3b}.bad{background:#6b2431}.warn{background:#6b5424}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.card{background:rgba(17,25,54,.94);border:1px solid #2a376a;border-radius:14px;padding:18px;box-shadow:0 14px 35px rgba(0,0,0,.2)}
+.card h2{font-size:1.08rem;margin:0 0 8px}.card p{color:#aeb9d4;min-height:42px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,input{border-radius:8px;border:1px solid #38477d;padding:9px 12px;background:#111a38;color:#eef2ff}
+button{background:#3c57c9;border-color:#3c57c9;cursor:pointer;font-weight:650}button:hover{filter:brightness(1.12)}
+input{width:100px}.out{margin-top:12px;padding:11px;background:#090e1e;border-radius:9px;white-space:pre-wrap;word-break:break-word;min-height:48px;color:#c9d4ef;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:8px;margin:15px 0}.metric{background:#111a38;border-radius:10px;padding:12px}.metric b{display:block;font-size:1.2rem}.metric span{font-size:.78rem;color:#9aa8c7}
+a{color:#8fb0ff}.note{padding:12px 14px;background:#16203f;border-left:4px solid #6886ff;border-radius:8px;margin:16px 0;color:#c6d0e8}
+@media(max-width:650px){.metrics{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <div>
+      <h1>eWSrv HTTP/2 专项测试中心</h1>
+      <div class="sub">ALPN · HPACK · multiplexing · DATA streaming · flow behavior · browser benchmark</div>
+    </div>
+    <div><a href="/">返回通用测试中心</a></div>
+  </div>
+
+  <div class="note">
+    浏览器通常只会通过 <b>HTTPS + ALPN</b> 使用 HTTP/2。明文 h2c prior-knowledge 请使用 EUnit 或 <code>wsHttp2Bench</code>。
+    页面会读取 Navigation/Resource Timing 的 <code>nextHopProtocol</code>；显示 <code>h2</code> 才说明浏览器实际走 HTTP/2。
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><b id="navProto">-</b><span>页面协议</span></div>
+    <div class="metric"><b id="probeProto">-</b><span>Fetch 协议</span></div>
+    <div class="metric"><b id="tls">-</b><span>页面传输</span></div>
+    <div class="metric"><b id="serverVersion">-</b><span>服务端看到的版本</span></div>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>1. 协议 / ALPN 探测</h2>
+      <p>确认浏览器实际协商 h2，并由服务器返回请求版本。</p>
+      <button onclick="probeProtocol()">运行探测</button>
+      <div class="out" id="probeOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. 基础 GET / POST</h2>
+      <p>验证普通请求与 DATA 请求体在 HTTP/2 下保持现有 handler 兼容。</p>
+      <button onclick="basicTest()">运行基础测试</button>
+      <div class="out" id="basicOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>3. Multiplexing 并发</h2>
+      <p>同一 origin 并发发出多个延迟请求，观察 HTTP/2 多 stream 并行处理。</p>
+      <div class="row">请求数 <input id="multiN" type="number" value="20" min="2" max="100"> 延迟ms <input id="multiMs" type="number" value="200" min="1" max="5000"></div>
+      <button onclick="multiplexTest()">运行多路复用</button>
+      <div class="out" id="multiOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>4. Burst QPS</h2>
+      <p>浏览器端并发压测，输出 RPS 与 p50/p95/p99。用于快速对比，不替代 Erlang 本地 benchmark。</p>
+      <div class="row">总请求 <input id="burstN" type="number" value="500" min="10" max="10000"> 并发 <input id="burstC" type="number" value="50" min="1" max="100"></div>
+      <button onclick="burstTest()">开始 Burst</button>
+      <div class="out" id="burstOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>5. 大响应吞吐</h2>
+      <p>下载动态生成的二进制响应，检查 DATA frame 分片与发送 flow-control。</p>
+      <div class="row">大小 MiB <input id="downMb" type="number" value="8" min="1" max="64"></div>
+      <button onclick="downloadTest()">下载测试</button>
+      <div class="out" id="downOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>6. 大请求体 / Echo</h2>
+      <p>上传二进制 body 并回显，验证 DATA 接收、body 上限和响应发送。</p>
+      <div class="row">大小 MiB <input id="upMb" type="number" value="2" min="1" max="8"></div>
+      <button onclick="uploadTest()">上传测试</button>
+      <div class="out" id="upOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>7. 流式 DATA</h2>
+      <p>读取 /stream 的 ReadableStream，观察分块到达时间，验证 HTTP/2 streaming。</p>
+      <button onclick="streamTest()">运行流式测试</button>
+      <div class="out" id="streamOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>8. RST_STREAM / Abort</h2>
+      <p>客户端取消一个延迟 stream 后立即发新请求，验证取消不会破坏整个 H2 connection。</p>
+      <button onclick="abortTest()">运行取消测试</button>
+      <div class="out" id="abortOut"></div>
+    </section>
+
+    <section class="card">
+      <h2>9. Compression</h2>
+      <p>请求可压缩响应并显示 Content-Encoding、Vary 与最终正文长度。</p>
+      <button onclick="compressionTest()">运行压缩测试</button>
+      <div class="out" id="compressOut"></div>
+    </section>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const now=()=>performance.now();
+const fmt=n=>Number(n).toFixed(2);
+function log(id,s){$(id).textContent=s}
+function navProtocol(){
+  const n=performance.getEntriesByType('navigation')[0];
+  return n?.nextHopProtocol || 'unknown';
+}
+function resourceProtocol(urlPart){
+  const xs=performance.getEntriesByType('resource').filter(x=>x.name.includes(urlPart));
+  return xs.length ? (xs[xs.length-1].nextHopProtocol||'unknown') : 'unknown';
+}
+function percentile(xs,p){
+  if(!xs.length)return 0;
+  const a=[...xs].sort((a,b)=>a-b);
+  return a[Math.min(a.length-1,Math.floor((a.length-1)*p))];
+}
+async function probeProtocol(){
+  performance.clearResourceTimings();
+  const r=await fetch('/h2/info?t='+Date.now(),{cache:'no-store'});
+  const info=await r.json();
+  const proto=resourceProtocol('/h2/info');
+  $('probeProto').textContent=proto;
+  $('serverVersion').textContent=info.version;
+  log('probeOut',JSON.stringify({...info,navigationProtocol:navProtocol(),resourceProtocol:proto},null,2));
+}
+async function basicTest(){
+  const g=await fetch('/hello',{cache:'no-store'}); const gt=await g.text();
+  const payload='HTTP/2 POST echo '+Date.now();
+  const p=await fetch('/echo',{method:'POST',body:payload,cache:'no-store'}); const pt=await p.text();
+  log('basicOut','GET /hello: '+g.status+' '+gt+'\nPOST /echo: '+p.status+' '+(pt===payload?'OK':'MISMATCH'));
+}
+async function multiplexTest(){
+  const n=Math.max(2,Math.min(100,+$('multiN').value||20));
+  const ms=Math.max(1,Math.min(5000,+$('multiMs').value||200));
+  performance.clearResourceTimings();
+  const t=now();
+  const rs=await Promise.all(Array.from({length:n},(_,i)=>fetch('/h2/delay/'+ms+'?i='+i,{cache:'no-store'}).then(r=>r.text())));
+  const elapsed=now()-t;
+  const proto=resourceProtocol('/h2/delay/');
+  log('multiOut',`protocol=${proto}\nstreams=${n}\ndelay_each=${ms} ms\nwall=${fmt(elapsed)} ms\nideal_parallel≈${ms} ms\nall_ok=${rs.every(x=>x.includes('delay'))}`);
+}
+async function burstTest(){
+  const total=Math.max(10,Math.min(10000,+$('burstN').value||500));
+  const conc=Math.max(1,Math.min(100,+$('burstC').value||50));
+  let next=0,done=0; const lats=[]; const t0=now();
+  async function worker(){
+    for(;;){
+      const i=next++; if(i>=total)return;
+      const t=now(); const r=await fetch('/hello?bench='+i,{cache:'no-store'});
+      await r.arrayBuffer(); lats.push(now()-t); done++;
+      if(done%100===0)log('burstOut','running '+done+'/'+total);
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(conc,total)},worker));
+  const ms=now()-t0, rps=total*1000/ms;
+  log('burstOut',`requests=${total}\nconcurrency=${conc}\ntime=${fmt(ms)} ms\nrps=${fmt(rps)}\np50=${fmt(percentile(lats,.50))} ms\np95=${fmt(percentile(lats,.95))} ms\np99=${fmt(percentile(lats,.99))} ms\nprotocol=${resourceProtocol('/hello?bench=')}`);
+}
+async function downloadTest(){
+  const mb=Math.max(1,Math.min(64,+$('downMb').value||8)); const bytes=mb*1024*1024;
+  const t=now(); const r=await fetch('/h2/bytes/'+bytes,{cache:'no-store'}); const b=await r.arrayBuffer(); const ms=now()-t;
+  log('downOut',`status=${r.status}\nbytes=${b.byteLength}\ntime=${fmt(ms)} ms\nthroughput=${fmt((b.byteLength/1048576)/(ms/1000))} MiB/s\nprotocol=${resourceProtocol('/h2/bytes/')}`);
+}
+async function uploadTest(){
+  const mb=Math.max(1,Math.min(8,+$('upMb').value||2)); const bytes=mb*1024*1024;
+  const body=new Uint8Array(bytes); body.fill(65);
+  const t=now(); const r=await fetch('/echo',{method:'POST',body,cache:'no-store'}); const b=await r.arrayBuffer(); const ms=now()-t;
+  log('upOut',`status=${r.status}\nsent=${bytes}\nechoed=${b.byteLength}\ntime=${fmt(ms)} ms\nroundtrip_payload=${fmt(((bytes+b.byteLength)/1048576)/(ms/1000))} MiB/s`);
+}
+async function streamTest(){
+  const t=now(); const r=await fetch('/stream',{cache:'no-store'}); const reader=r.body.getReader(); let chunks=0,bytes=0,marks=[];
+  for(;;){const x=await reader.read();if(x.done)break;chunks++;bytes+=x.value.byteLength;marks.push(fmt(now()-t)+'ms:'+x.value.byteLength+'B')}
+  log('streamOut',`status=${r.status}\nchunks=${chunks}\nbytes=${bytes}\ntotal=${fmt(now()-t)} ms\narrivals=${marks.join(', ')}`);
+}
+async function abortTest(){
+  const c=new AbortController(); const slow=fetch('/h2/delay/2000',{signal:c.signal,cache:'no-store'}).catch(e=>e.name);
+  setTimeout(()=>c.abort(),50); const aborted=await slow;
+  const t=now(); const r=await fetch('/hello?after_abort=1',{cache:'no-store'}); const txt=await r.text();
+  log('abortOut',`aborted=${aborted}\nfollowup_status=${r.status}\nfollowup=${txt}\nfollowup_time=${fmt(now()-t)} ms`);
+}
+async function compressionTest(){
+  const r=await fetch('/compressed',{headers:{'Accept-Encoding':'gzip, deflate'},cache:'no-store'}); const txt=await r.text();
+  log('compressOut',`status=${r.status}\ncontent-encoding=${r.headers.get('content-encoding')}\nvary=${r.headers.get('vary')}\ndecoded_length=${txt.length}`);
+}
+window.addEventListener('load',()=>{
+  $('navProto').textContent=navProtocol();
+  $('tls').textContent=location.protocol==='https:'?'HTTPS':'HTTP';
+  probeProtocol().catch(e=>log('probeOut',String(e)));
+});
+</script>
+</body>
+</html>
