@@ -163,6 +163,8 @@ parseTransferEncoding(Value, Rest, Socket,
    case Current of
       N when is_integer(N) ->
          {error, content_length_transfer_encoding_conflict};
+      chunked ->
+         {error, duplicate_transfer_encoding};
       _ ->
          case validChunkedEncoding(Value) of
             false ->
