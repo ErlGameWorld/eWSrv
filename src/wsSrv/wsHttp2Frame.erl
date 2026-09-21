@@ -25,7 +25,7 @@
 	settingsFrame/1, settingsDecode/1,
 	ackFrame/0, pingFrame/1, pongFrame/1, goawayFrame/2,
 	windowUpdateFrame/2, rstStreamFrame/2,
-	headersFrames/3, dataFrames/3,
+	headersFrames/3, headersFrames/4, dataFrames/3,
 	splitPayload/2,
 	goawayFields/1, pingData/1, windowUpdateIncrement/1,
 	rstStreamCode/1, priorityFields/1
@@ -168,20 +168,25 @@ rstStreamFrame(StreamId, ErrorCode) ->
 %% @returns 可直接发送的 iolist
 -spec headersFrames(HeaderBlock, StreamId, MaxFrame) -> iodata() when HeaderBlock :: iodata(), StreamId :: pos_integer(), MaxFrame :: pos_integer().
 headersFrames(Block, StreamId, MaxFrame) ->
+	headersFrames(Block, StreamId, MaxFrame, false).
+
+%% @doc 构造响应HEADERS。EndStream=true时END_STREAM只出现在首个HEADERS帧；
+%% CONTINUATION只能承载END_HEADERS，且整个header block连续发送。
+-spec headersFrames(HeaderBlock, StreamId, MaxFrame, EndStream) -> iodata()
+	when HeaderBlock :: iodata(), StreamId :: pos_integer(),
+		MaxFrame :: pos_integer(), EndStream :: boolean().
+headersFrames(Block, StreamId, MaxFrame, EndStream) ->
+	BaseFlags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
 	case splitPayload(iolist_to_binary(Block), MaxFrame) of
-		%% 空 header 块也要发一帧，否则对端等不到 END_HEADERS。
-		[] -> frame(headers, StreamId, <<>>, ?FLAG_END_HEADERS);
-		[Last] -> frame(headers, StreamId, Last, ?FLAG_END_HEADERS);
+		[] -> frame(headers, StreamId, <<>>, BaseFlags bor ?FLAG_END_HEADERS);
+		[Last] -> frame(headers, StreamId, Last, BaseFlags bor ?FLAG_END_HEADERS);
 		[First | Rest] ->
-			%% 首块走 HEADERS 且不带 END_HEADERS，其余块一律走 CONTINUATION。
+			N = length(Rest),
 			Conts = [begin
-				IsLast = (I =:= length(Rest)),
-				frame(continuation, StreamId, Chunk,
-					case IsLast of true -> ?FLAG_END_HEADERS;
-						false -> 0 end)
-			end
-				|| {I, Chunk} <- lists:zip(lists:seq(1, length(Rest)), Rest)],
-			[frame(headers, StreamId, First, 0) | Conts]
+				Flags = case I =:= N of true -> ?FLAG_END_HEADERS; false -> 0 end,
+				frame(continuation, StreamId, Chunk, Flags)
+			end || {I, Chunk} <- lists:zip(lists:seq(1, N), Rest)],
+			[frame(headers, StreamId, First, BaseFlags) | Conts]
 	end.
 
 %% @doc 把消息体切成 DATA frame 序列，最后一帧带 END_STREAM。
