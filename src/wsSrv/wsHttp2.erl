@@ -567,18 +567,25 @@ applyData(Flags, StreamId, Payload, Rest, State0) ->
    Streams = maps:get(streams, State0),
    case maps:get(StreamId, Streams, undefined) of
       undefined ->
-         case StreamId > maps:get(last_client_stream, State0) of
-            true -> connError(protocol_error, data_on_idle_stream, State0);
-            false ->
-               State1 = streamError(StreamId, stream_closed, State0),
-               applyFrames(Rest, State1)
+         case streamState(StreamId, State0) of
+            idle ->
+               connError(protocol_error, {data_on_idle_stream, StreamId}, State0);
+            closed ->
+               discardClosedData(Flags, StreamId, Payload, Rest, State0);
+            _ ->
+               connError(protocol_error, {data_invalid_stream, StreamId}, State0)
          end;
+      #{remote_closed := true} ->
+         %% DATA after END_STREAM is a stream error, but the complete DATA
+         %% payload still consumes connection flow-control credit.
+         discardClosedData(Flags, StreamId, Payload, Rest, State0);
       Stream0 ->
          FlowBytes = byte_size(Payload),
          ConnWin = maps:get(recv_conn_window, State0),
          StreamWin = maps:get(recv_window, Stream0),
          case {FlowBytes =< ConnWin, FlowBytes =< StreamWin} of
-            {false, _} -> connError(flow_control_error, connection_receive_window_exceeded, State0);
+            {false, _} ->
+               connError(flow_control_error, connection_receive_window_exceeded, State0);
             {_, false} ->
                State1 = streamError(StreamId, flow_control_error, State0),
                applyFrames(Rest, State1);
@@ -603,10 +610,12 @@ applyData(Flags, StreamId, Payload, Rest, State0) ->
                               streams => Streams#{StreamId := Stream1}
                            },
                            case replenishReceiveWindows(StreamId, FlowBytes, State1) of
-                              {error, Reason, State2} -> {stop, {socket_error, Reason}, State2};
+                              {error, Reason, State2} ->
+                                 {stop, {socket_error, Reason}, State2};
                               {ok, State2} ->
                                  case Flags band ?END_STREAM =/= 0 of
-                                    false -> applyFrames(Rest, State2);
+                                    false ->
+                                       applyFrames(Rest, State2);
                                     true ->
                                        Stream2 = maps:get(StreamId, maps:get(streams, State2)),
                                        case validateRequestLength(Stream2) of
@@ -624,6 +633,41 @@ applyData(Flags, StreamId, Payload, Rest, State0) ->
                      end
                end
          end
+   end.
+
+discardClosedData(Flags, StreamId, Payload, Rest, State0) ->
+   FlowBytes = byte_size(Payload),
+   ConnWin = maps:get(recv_conn_window, State0),
+   case FlowBytes =< ConnWin of
+      false ->
+         connError(flow_control_error, connection_receive_window_exceeded, State0);
+      true ->
+         case stripDataPayload(Flags, Payload) of
+            {error, Reason} ->
+               connError(protocol_error, Reason, State0);
+            {ok, _DiscardedBody} ->
+               State1 = State0#{recv_conn_window => ConnWin - FlowBytes},
+               case replenishConnectionWindow(FlowBytes, State1) of
+                  {error, Reason, State2} ->
+                     {stop, {socket_error, Reason}, State2};
+                  {ok, State2} ->
+                     State3 = streamError(StreamId, stream_closed, State2),
+                     applyFrames(Rest, State3)
+               end
+         end
+   end.
+
+replenishConnectionWindow(0, State) ->
+   {ok, State};
+replenishConnectionWindow(FlowBytes, State0) ->
+   case wsNet:send(maps:get(socket, State0),
+      wsHttp2Frame:windowUpdateFrame(0, FlowBytes)) of
+      ok ->
+         {ok, State0#{
+            recv_conn_window => maps:get(recv_conn_window, State0) + FlowBytes
+         }};
+      {error, Reason} ->
+         {error, Reason, State0}
    end.
 
 replenishReceiveWindows(_StreamId, 0, State) ->
