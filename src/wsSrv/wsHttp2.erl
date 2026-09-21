@@ -2,7 +2,7 @@
 
 -include("wsCom.hrl").
 
--export([new/5, start/1, handleData/2, handleResponse/4, handleWorkerDown/3]).
+-export([new/5, start/1, handleData/2, handleResponse/4, handleWorkerDown/3, terminate/1]).
 
 -define(PREFACE, <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>).
 -define(END_STREAM, 16#01).
@@ -1149,7 +1149,28 @@ streamError(StreamId, Code, State) ->
    dropStream(StreamId, State).
 
 dropStream(StreamId, State) ->
-   State#{streams => maps:remove(StreamId, maps:get(streams, State))}.
+   Streams = maps:get(streams, State),
+   case maps:get(StreamId, Streams, undefined) of
+      #{handler_pid := Pid, handler_ref := Ref} ->
+         erlang:demonitor(Ref, [flush]),
+         exit(Pid, kill);
+      _ ->
+         ok
+   end,
+   State#{streams => maps:remove(StreamId, Streams)}.
+
+%% @doc Stop any outstanding handler workers when the connection goes away.
+terminate(State) ->
+   maps:foreach(fun(_StreamId, Stream) ->
+      case Stream of
+         #{handler_pid := Pid, handler_ref := Ref} ->
+            erlang:demonitor(Ref, [flush]),
+            exit(Pid, kill);
+         _ ->
+            ok
+      end
+   end, maps:get(streams, State, #{})),
+   ok.
 
 connError(Code, Reason, State) ->
    Last = maps:get(last_client_stream, State, 0),
