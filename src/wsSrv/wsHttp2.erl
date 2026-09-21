@@ -869,7 +869,7 @@ normalizeFileRange(Data, Range) ->
 
 sendResponse(StreamId, Code, Headers0, Body0, Method, State0) ->
    Body = iolist_to_binary(Body0),
-   SendBody = not (Method =:= 'HEAD' orelse Code =:= 204 orelse Code =:= 304 orelse (Code >= 100 andalso Code < 200)),
+   SendBody = not (Method =:= 'HEAD' orelse Code =:= 204 orelse Code =:= 205 orelse Code =:= 304 orelse (Code >= 100 andalso Code < 200)),
    WireBody = case SendBody of true -> Body; false -> <<>> end,
    Headers1 = responseHeaders(Code, Headers0, byte_size(Body), Method),
    H2Headers = [{<<":status">>, integer_to_binary(Code)} | Headers1],
@@ -904,6 +904,7 @@ responseHeaders(Code, Headers0, BodySize, Method) ->
    case Code of
       C when C >= 100, C < 200 -> Headers2;
       204 -> Headers2;
+      205 -> [{<<"content-length">>, <<"0">>} | Headers2];
       304 -> Headers2;
       _ when Method =:= 'HEAD' -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers2];
       _ -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers2]
