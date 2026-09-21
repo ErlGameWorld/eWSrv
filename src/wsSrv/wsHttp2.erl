@@ -41,6 +41,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       peer_max_frame => ?DEFAULT_MAX_FRAME,
       peer_initial_window => ?DEFAULT_WINDOW,
       peer_max_concurrent => infinity,
+      peer_max_header_list => infinity,
       send_conn_window => ?DEFAULT_WINDOW,
       recv_conn_window => ?DEFAULT_WINDOW,
       local_initial_window => ?DEFAULT_WINDOW,
@@ -314,7 +315,9 @@ applyPeerSettings(Settings, State0) ->
                   tx_hpack => Tx,
                   peer_initial_window => NewInitial,
                   peer_max_frame => proplists:get_value(max_frame_size, Settings, maps:get(peer_max_frame, State0)),
-                  peer_max_concurrent => proplists:get_value(max_concurrent_streams, Settings, maps:get(peer_max_concurrent, State0))
+                  peer_max_concurrent => proplists:get_value(max_concurrent_streams, Settings, maps:get(peer_max_concurrent, State0)),
+                  peer_max_header_list => proplists:get_value(
+                     max_header_list_size, Settings, maps:get(peer_max_header_list, State0))
                },
                flushAllPending(State1)
          end;
@@ -1042,32 +1045,49 @@ sendResponse(StreamId, Code, Headers0, Body0, Method, State0) ->
    WireBody = case SendBody of true -> Body; false -> <<>> end,
    Headers1 = responseHeaders(Code, Headers0, byte_size(Body), Method),
    H2Headers = [{<<":status">>, integer_to_binary(Code)} | Headers1],
-   Tx0 = maps:get(tx_hpack, State0),
-   {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
-   EndOnHeaders = WireBody =:= <<>>,
-   HFrames = wsHttp2Frame:headersFrames(Block, StreamId, maps:get(peer_max_frame, State0), EndOnHeaders),
-   case wsNet:send(maps:get(socket, State0), HFrames) of
-      {error, Reason} ->
-         {stop, {socket_error, Reason}, State0};
-      ok when EndOnHeaders ->
-         {ok, dropStream(StreamId, State0#{tx_hpack => Tx})};
-      ok ->
-         Streams = maps:get(streams, State0),
-         Stream = maps:get(StreamId, Streams),
-         State1 = State0#{
-            tx_hpack => Tx,
-            streams => Streams#{StreamId := Stream#{
-               pending_send => WireBody,
-               pending_end_stream => true,
-               pending_ack => undefined,
-               response_started => true
-            }}
-         },
-         case flushPending(StreamId, State1) of
-            {ok, State2} -> {ok, State2};
-            {error, Code2, Reason2} -> connError(Code2, Reason2, State1)
+   case responseHeadersAllowed(headerListSize(H2Headers), State0) of
+      false ->
+         %% Respect the peer's advertised maximum field section size and keep
+         %% handler-generated response headers bounded by our own safety limit.
+         {ok, streamError(StreamId, internal_error, State0)};
+      true ->
+         Tx0 = maps:get(tx_hpack, State0),
+         {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
+         EndOnHeaders = WireBody =:= <<>>,
+         HFrames = wsHttp2Frame:headersFrames(
+            Block, StreamId, maps:get(peer_max_frame, State0), EndOnHeaders),
+         case wsNet:send(maps:get(socket, State0), HFrames) of
+            {error, Reason} ->
+               {stop, {socket_error, Reason}, State0};
+            ok when EndOnHeaders ->
+               {ok, dropStream(StreamId, State0#{tx_hpack => Tx})};
+            ok ->
+               Streams = maps:get(streams, State0),
+               Stream = maps:get(StreamId, Streams),
+               State1 = State0#{
+                  tx_hpack => Tx,
+                  streams => Streams#{StreamId := Stream#{
+                     pending_send => WireBody,
+                     pending_end_stream => true,
+                     pending_ack => undefined,
+                     response_started => true
+                  }}
+               },
+               case flushPending(StreamId, State1) of
+                  {ok, State2} -> {ok, State2};
+                  {error, Code2, Reason2} -> connError(Code2, Reason2, State1)
+               end
          end
    end.
+
+responseHeadersAllowed(Size, State) ->
+   LocalMax = maps:get(max_header, State),
+   PeerMax = maps:get(peer_max_header_list, State, infinity),
+   Size =< LocalMax andalso
+      case PeerMax of
+         infinity -> true;
+         Max when is_integer(Max), Max >= 0 -> Size =< Max
+      end.
 
 responseHeaders(Code, Headers0, BodySize, Method) ->
    Headers1 = normalizeResponseHeaders(Headers0, []),
