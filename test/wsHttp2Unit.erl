@@ -79,6 +79,71 @@ priorKnowledge() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+
+http2_tls_alpn_integration_test_() ->
+   {timeout, 20, fun tlsAlpn/0}.
+
+tlsAlpn() ->
+   {ok, _} = application:ensure_all_started(eWSrv),
+   Name = ws_http2_tls_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   Priv = code:priv_dir(eWSrv),
+   Cert = filename:join(Priv, "server_cert.pem"),
+   Key = filename:join(Priv, "server_key.pem"),
+   try
+      {ok, _} = eWSrv:openSrv(Name, 0, [
+         {http2, true},
+         {wsMod, wsTPHer},
+         {sslOpts, [
+            {certfile, Cert},
+            {keyfile, Key},
+            {verify, verify_none}
+         ]}
+      ]),
+      ListenerName = ntCom:lsName(ssl, Name),
+      Port = ntSslListener:getListenPort(ListenerName),
+      {ok, Sock} = ssl:connect("127.0.0.1", Port, [
+         binary,
+         {active, false},
+         {verify, verify_none},
+         {alpn_advertised_protocols, [<<"h2">>]}
+      ], 5000),
+      ?assertEqual({ok, <<"h2">>}, ssl:negotiated_protocol(Sock)),
+
+      ok = ssl:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
+      {Parser1, ServerFrames} = recvUntilSsl(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
+      ?assert(hasSettings(ServerFrames)),
+
+      RequestHeaders = [
+         {<<":method">>, <<"GET">>},
+         {<<":scheme">>, <<"https">>},
+         {<<":authority">>, <<"127.0.0.1">>},
+         {<<":path">>, <<"/hello">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(RequestHeaders, wsHpack:new()),
+      ok = ssl:send(Sock, [
+         wsHttp2Frame:ackFrame(),
+         wsHttp2Frame:headersFrames(Block, 1, 16384, true)
+      ]),
+      {_Parser2, RespFrames} = recvUntilSsl(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, RespBody} = decodeResponse(RespFrames),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<"Hello, World!">>, RespBody),
+      ssl:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+recvUntilSsl(Pred, Sock, Parser0, Acc0, Timeout) ->
+   case Pred(Acc0) of
+      true -> {Parser0, Acc0};
+      false ->
+         {ok, Bin} = ssl:recv(Sock, 0, Timeout),
+         {Parser, Frames} = wsHttp2Frame:feed(Parser0, Bin),
+         Acc = Acc0 ++ Frames,
+         recvUntilSsl(Pred, Sock, Parser, Acc, Timeout)
+   end.
+
 hasSettings(Frames) ->
    lists:any(fun
       ({frame, settings, Flags, 0, _}) -> Flags band 1 =:= 0;
