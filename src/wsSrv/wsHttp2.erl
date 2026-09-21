@@ -1058,6 +1058,8 @@ sendResponse(StreamId, Code, Headers0, Body0, Method, State0) ->
             tx_hpack => Tx,
             streams => Streams#{StreamId := Stream#{
                pending_send => WireBody,
+               pending_end_stream => true,
+               pending_ack => undefined,
                response_started => true
             }}
          },
@@ -1124,13 +1126,22 @@ flushPendingLoop(StreamId, Pending, State0) ->
    MaxFrame = maps:get(peer_max_frame, State0),
    Allowed = erlang:max(0, lists:min([byte_size(Pending), ConnWin, StreamWin, MaxFrame])),
    case Allowed of
-      0 -> {ok, State0};
+      0 ->
+         {ok, State0};
       N ->
          <<Chunk:N/binary, Rest/binary>> = Pending,
-         Flags = case Rest of <<>> -> ?END_STREAM; _ -> 0 end,
+         EndStream = maps:get(pending_end_stream, Stream, true),
+         Flags =
+            case {Rest, EndStream} of
+               {<<>>, true} -> ?END_STREAM;
+               _ -> 0
+            end,
          Frame = wsHttp2Frame:frame(data, StreamId, Chunk, Flags),
          case wsNet:send(maps:get(socket, State0), Frame) of
-            {error, Reason} -> {error, internal_error, {socket_error, Reason}};
+            {error, Reason} ->
+               completePendingAck(maps:get(pending_ack, Stream, undefined),
+                  {error, closed}),
+               {error, internal_error, {socket_error, Reason}};
             ok ->
                Stream1 = Stream#{
                   send_window => StreamWin - N,
@@ -1141,8 +1152,19 @@ flushPendingLoop(StreamId, Pending, State0) ->
                   streams => Streams#{StreamId := Stream1}
                },
                case Rest of
-                  <<>> -> {ok, dropStream(StreamId, State1)};
-                  _ -> flushPendingLoop(StreamId, Rest, State1)
+                  <<>> when EndStream ->
+                     completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
+                     {ok, dropStream(StreamId, State1)};
+                  <<>> ->
+                     completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
+                     Streams1 = maps:get(streams, State1),
+                     Stream2 = maps:get(StreamId, Streams1),
+                     {ok, State1#{streams => Streams1#{StreamId := Stream2#{
+                        pending_ack => undefined,
+                        pending_end_stream => false
+                     }}}};
+                  _ ->
+                     flushPendingLoop(StreamId, Rest, State1)
                end
          end
    end.
@@ -1526,6 +1548,7 @@ dropStream(StreamId, State) ->
          ok;
       Stream ->
          _ = cancelRequestTimer(Stream),
+         failStreamPendingAck(Stream),
          case Stream of
             #{handler_pid := Pid, handler_ref := Ref} ->
                erlang:demonitor(Ref, [flush]),
