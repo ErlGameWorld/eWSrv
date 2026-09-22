@@ -17,6 +17,7 @@
    , splitArgs/1
    , closeOrKeepAlive/2
    , maybeSendContinue/2
+   , tryCompressResponse/5
 ]).
 
 %% eNet callback
@@ -42,6 +43,7 @@ newConn(Sock, ConnArgs) ->
 -spec(start_link(atom()) -> {ok, pid()} | ignore | {error, term()}).
 start_link(ConnArgs) ->
    proc_lib:start_link(?MODULE, init_it, [self(), ConnArgs], infinity, []).
+
 start_link(Sock, ConnArgs) ->
    proc_lib:start_link(?MODULE, init_it, [self(), {Sock, ConnArgs}], infinity, []).
 
@@ -83,7 +85,7 @@ loop(Parent, State) ->
       {'EXIT', Parent, Reason} ->
          terminate(Reason, State);
       Msg ->
-         case handleMsg(Msg, State) of
+         try handleMsg(Msg, State) of
             kpS ->
                loop(Parent, State);
             {ok, NewState} ->
@@ -92,8 +94,50 @@ loop(Parent, State) ->
                terminate(Reason, State);
             {stop, Reason, NewState} ->
                terminate(Reason, NewState)
+         catch
+            Class:CrashReason:Stack ->
+               ?wsErr("wsHttp handleMsg crash ~p:~p ~p", [Class, CrashReason, Stack]),
+               terminate({handler_crash, Class, CrashReason}, State)
          end
+   after loopTimeout(State) ->
+      case handleLoopTimeout(State) of
+         {ok, NewState} ->
+            loop(Parent, NewState);
+         {stop, Reason} ->
+            terminate(Reason, State);
+         {stop, Reason, NewState} ->
+            terminate(Reason, NewState)
+      end
    end.
+
+handleLoopTimeout(#wsState{protocol = http2, h2State = H2} = State) when is_map(H2) ->
+   NH2 = wsHttp2:idleClose(H2),
+   _ = erlang:send_after(50, self(), h2_drain_close),
+   {ok, State#wsState{h2State = NH2}};
+handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined}) ->
+   {stop, normal};
+handleLoopTimeout(#wsState{stage = wsWs} = State) ->
+   {ok, State};
+handleLoopTimeout(#wsState{socket = Socket}) ->
+   try sendRescueResponse(Socket, 408, <<"Request Timeout">>)
+   catch _:_ -> ok
+   end,
+   {stop, timeout}.
+
+loopTimeout(#wsState{stage = wsWs}) ->
+   infinity;
+loopTimeout(#wsState{protocol = http2, h2State = H2, keepAliveTimeout = Timeout}) ->
+   case is_map(H2) andalso wsHttp2:hasOpenStreams(H2) of
+      true -> infinity;
+      false -> Timeout
+   end;
+loopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined, keepAliveTimeout = Timeout}) ->
+   Timeout;
+loopTimeout(#wsState{requestStartedAt = undefined, requestTimeout = Timeout}) ->
+   Timeout;
+loopTimeout(#wsState{requestStartedAt = Started, requestTimeout = Timeout}) ->
+   Now = erlang:monotonic_time(millisecond),
+   erlang:max(0, Timeout - (Now - Started)).
 
 matchCallMsg(CurState, From, Request) ->
    #wsState{wsMod = WsMod, webState = WebState} = CurState,
@@ -174,31 +218,91 @@ handleCR(CurState, Result, From) ->
    end.
 
 innerError(_CurState, Error, Class, Reason, Strace) ->
-   error_logger:error_msg("wsHttp inner error ~p ~p ~p ~p ~p~n", [?MODULE, Error, Class, Reason, Strace]),
+   logger:error("wsHttp inner error ~p ~p ~p ~p ~p", [?MODULE, Error, Class, Reason, Strace]),
    ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ************************************************  API ***************************************************************
 init(Args) ->
    case Args of
-      {undefined, WsMod, MaxSize, ChunkedSupp} ->
-         {ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp, is_behavior = false}};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
-         case WsMod:init(Args) of
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+            Http2, RequestTimeout, KeepAliveTimeout, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout}} ->
+         case maybeInitHandler(WsMod, Args) of
             {ok, WebState} ->
-               {ok, #wsState{wsMod = WsMod, maxSize = MaxSize, chunkedSupp = ChunkedSupp, is_behavior = true, webState = WebState}};
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+                  Http2, RequestTimeout, KeepAliveTimeout, true, WebState)};
+            {stop, Reason} ->
+               {stop, Reason}
+         end;
+      %% 兼容前一版feature分支的9元组连接参数。
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+            Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2}} ->
+         case maybeInitHandler(WsMod, Args) of
+            {ok, WebState} ->
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+                  Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, true, WebState)};
+            {stop, Reason} ->
+               {stop, Reason}
+         end;
+      %% 兼容旧版eNet传入的4元组连接参数。
+      {undefined, WsMod, MaxSize, ChunkedSupp} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize,
+            ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
+         case maybeInitHandler(WsMod, Args) of
+            {ok, WebState} ->
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize,
+                  ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout,
+                  true, WebState)};
             {stop, Reason} ->
                {stop, Reason}
          end
    end.
 
-handleMsg({tcp, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+   Http2, RequestTimeout, KeepAliveTimeout, IsBehavior, WebState) ->
+   Protocol = case Http2 of true -> detect; false -> http1 end,
+   #wsState{
+      wsMod = WsMod,
+      maxSize = MaxSize,
+      chunkedSupp = ChunkedSupp,
+      maxRequestLineSize = MaxReqLine,
+      maxHeaderSize = MaxHeader,
+      maxWsFrameSize = MaxWsFrame,
+      maxWsMessageSize = MaxWsMessage,
+      http2Enabled = Http2,
+      protocol = Protocol,
+      requestTimeout = RequestTimeout,
+      keepAliveTimeout = KeepAliveTimeout,
+      is_behavior = IsBehavior,
+      webState = WebState
+   }.
+
+maybeInitHandler(WsMod, Args) ->
+   case erlang:function_exported(WsMod, init, 1) of
+      true -> WsMod:init(Args);
+      false -> {ok, undefined}
+   end.
+
+handleMsg({tcp, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
+   handleHttp2Data(Data, H2, State);
+handleMsg({tcp, _Socket, Data}, #wsState{protocol = detect, http2Enabled = true} = State) ->
+   detectCleartextProtocol(Data, State);
+handleMsg({tcp, _Socket, Data}, State0) ->
+   State = ensureRequestStarted(State0),
+   #wsState{stage = Stage, socket = Socket} = State,
+   case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
+         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         Version = WsReq#wsReq.version,
+         case doResponse(Response, Socket, TemHeader, Method, Version) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -217,13 +321,18 @@ handleMsg({tcp, _Socket, Data}, State) ->
                      handleMsg({tcp, Socket, NBuffer}, NewWsState)
                end;
             close ->
-               {stop, normal}
+               {stop, normal};
+            {stop, Reason} ->
+               {stop, Reason};
+            {stop, Reason, StopState} ->
+               {stop, Reason, StopState}
          end;
       {ok, _NewState} = LRet ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
-      {close, Reason, _NewState} ->
+      {close, Reason, NewState} ->
+         maybeSendWsClose(NewState, Reason),
          {stop, Reason};
       Err ->
          case Err of
@@ -236,6 +345,45 @@ handleMsg({tcp, _Socket, Data}, State) ->
                {stop, Err}
          end
    end;
+handleMsg(h2_drain_close, #wsState{protocol = http2} = _State) ->
+   {stop, normal};
+handleMsg({h2_settings_ack_timeout, Token}, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleSettingsTimeout(Token, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_request_timeout, StreamId, Token}, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleRequestTimeout(StreamId, Token, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_stream_start, StreamId, WorkerPid, Token, Req, Headers, Initial},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamStart(StreamId, WorkerPid, Token, Req, Headers, Initial, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_stream_chunk, StreamId, WorkerPid, Token, Data, From},
+   #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamChunk(StreamId, WorkerPid, Token, Data, From, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_stream_close, StreamId, WorkerPid, From}, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleStreamClose(StreamId, WorkerPid, From, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({h2_response, StreamId, WorkerPid, Req, Response}, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end;
+handleMsg({'DOWN', MonitorRef, process, _Pid, Reason}, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:handleWorkerDown(MonitorRef, Reason, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, StopReason, NH2} -> {stop, StopReason, State#wsState{h2State = NH2}}
+   end;
 handleMsg({tcp_closed, _Socket}, _State) ->
    {stop, normal};
 handleMsg({tcp_error, _Socket, Reason}, _State) ->
@@ -245,13 +393,17 @@ handleMsg({tcp_passive, Socket}, _State) ->
    wsNet:setopts(Socket, [{active, ?ActionN}]),
    kpS;
 
-handleMsg({ssl, _Socket, Data}, State) ->
-   #wsState{stage = Stage, buffer = Buffer, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, <<Buffer/binary, Data/binary>>, Socket, State) of
+handleMsg({ssl, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
+   handleHttp2Data(Data, H2, State);
+handleMsg({ssl, _Socket, Data}, State0) ->
+   State = ensureRequestStarted(State0),
+   #wsState{stage = Stage, socket = Socket} = State,
+   case wsHttpProtocol:request(Stage, Data, Socket, State) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method} = NewState,
-         case doResponse(Response, Socket, TemHeader, Method) of
+         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         Version = WsReq#wsReq.version,
+         case doResponse(Response, Socket, TemHeader, Method, Version) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -266,16 +418,21 @@ handleMsg({ssl, _Socket, Data}, State) ->
                case NBuffer of
                   <<>> -> {ok, NewWsState};
                   _ ->
-                     handleMsg({tcp, Socket, NBuffer}, NewWsState)
+                     handleMsg({ssl, Socket, NBuffer}, NewWsState)
                end;
             close ->
-               {stop, normal}
+               {stop, normal};
+            {stop, Reason} ->
+               {stop, Reason};
+            {stop, Reason, StopState} ->
+               {stop, Reason, StopState}
          end;
       {ok, _NewState} = LRet ->
          LRet;
       {close, _NewState} ->
          {stop, normal};
-      {close, Reason, _NewState} ->
+      {close, Reason, NewState} ->
+         maybeSendWsClose(NewState, Reason),
          {stop, Reason};
       Err ->
          case Err of
@@ -302,8 +459,8 @@ handleMsg({?mSockReady, Socket}, State) ->
 handleMsg({?mSockReady, Socket, SslOpts, SslHSTet}, State) ->
    case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
       {ok, SslSock} ->
-         ssl:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
-         {ok, State#wsState{socket = SslSock, isSsl = true}};
+         ssl:setopts(SslSock, [{packet, raw}, {active, ?ActionN}]),
+         sslProtocolState(SslSock, State#wsState{socket = SslSock, isSsl = true});
       _Err ->
          ?wsErr("ssl handshake error ~p~n", [_Err]),
          {stop, handshake_error}
@@ -324,22 +481,121 @@ handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
          kpS
    end.
 
-terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState, is_behavior = IsBehavior} = _State) ->
-   IsBehavior andalso WsMod:terminate(Reason, WebState),
+detectCleartextProtocol(Data, #wsState{buffer = Buffer} = State) ->
+   All = <<Buffer/binary, Data/binary>>,
+   Preface = <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>,
+   CheckLen = erlang:min(byte_size(All), byte_size(Preface)),
+   Prefix = binary:part(Preface, 0, CheckLen),
+   case binary:part(All, 0, CheckLen) =:= Prefix of
+      false ->
+         %% 不是HTTP/2 prior-knowledge，完整交回HTTP/1 parser。
+         handleMsg({tcp, State#wsState.socket, All}, State#wsState{protocol = http1, buffer = <<>>});
+      true when byte_size(All) < byte_size(Preface) ->
+         {ok, State#wsState{buffer = All}};
+      true ->
+         case startHttp2(State#wsState{buffer = <<>>}, http) of
+            {ok, H2State, NState} -> handleHttp2Data(All, H2State, NState);
+            {error, Reason} -> {stop, {http2_start, Reason}}
+         end
+   end.
+
+sslProtocolState(SslSock, #wsState{http2Enabled = true} = State) ->
+   case ssl:negotiated_protocol(SslSock) of
+      {ok, <<"h2">>} ->
+         case startHttp2(State, https) of
+            {ok, _H2, NState} -> {ok, NState};
+            {error, Reason} -> {stop, {http2_start, Reason}}
+         end;
+      _ ->
+         {ok, State#wsState{protocol = http1}}
+   end;
+sslProtocolState(_SslSock, State) ->
+   {ok, State#wsState{protocol = http1}}.
+
+startHttp2(#wsState{socket = Socket, wsMod = WsMod, maxSize = MaxBody, maxHeaderSize = MaxHeader} = State, Scheme) ->
+   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout),
+   case wsHttp2:start(H20) of
+      {ok, H2} ->
+         NState = State#wsState{protocol = http2, h2State = H2, requestStartedAt = undefined, buffer = <<>>},
+         {ok, H2, NState};
+      {error, Reason} ->
+         {error, Reason}
+   end.
+
+handleHttp2Data(Data, H2, State) ->
+   case wsHttp2:handleData(Data, H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+   end.
+
+maybeSendWsClose(#wsState{stage = wsWs}, normal) ->
+   %% 正常Close handshake已在wsWebSocket中回显Close帧。
+   ok;
+maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
+   Code =
+      case Reason of
+         message_too_big -> 1009;
+         invalid_utf8 -> 1007;
+         _ -> 1002
+      end,
+   try wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>)
+   catch _:_ -> ok
+   end,
+   ok;
+maybeSendWsClose(_State, _Reason) ->
+   ok.
+
+terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState,
+   is_behavior = IsBehavior, protocol = Protocol, h2State = H2State} = _State) ->
+   case {Protocol, H2State} of
+      {http2, H2} when is_map(H2) ->
+         try wsHttp2:terminate(H2)
+         catch _:_ -> ok
+         end;
+      _ ->
+         ok
+   end,
+   case IsBehavior andalso erlang:function_exported(WsMod, terminate, 2) of
+      true ->
+         try WsMod:terminate(Reason, WebState) catch _:_ -> ok end;
+      false ->
+         ok
+   end,
    try wsNet:close(Socket)
    catch _:_ -> ok
    end,
-   exit(Reason).
+   %% 走到这里都是协议处理完后的主动关闭。proc_lib 只把
+   %% normal / shutdown / {shutdown, _} 视为正常结束，其它原因会打 CRASH REPORT。
+   exit(shutdown_reason(Reason)).
+
+shutdown_reason(normal) -> normal;
+shutdown_reason(shutdown) -> shutdown;
+shutdown_reason({shutdown, _} = Reason) -> Reason;
+shutdown_reason(Reason) -> {shutdown, Reason}.
+
+ensureRequestStarted(#wsState{stage = wsWs} = State) ->
+   State;
+ensureRequestStarted(#wsState{requestStartedAt = undefined} = State) ->
+   State#wsState{requestStartedAt = erlang:monotonic_time(millisecond)};
+ensureRequestStarted(State) ->
+   State.
 
 newWsState(WsState) ->
    WsState#wsState{
       stage = reqLine
       , buffer = <<>>
+      , wsParse = undefined
       , wsReq = undefined
       , headerCnt = 0
+      , headerBytes = 0
+      , hostHeaderSeen = false
       , temHeader = []
       , contentLength = undefined
+      , bodyAcc = []
+      , bodySize = 0
+      , chunkState = size
       , temChunked = <<>>
+      , requestStartedAt = undefined
    }.
 
 %% @doc Execute the user callback, translating failure into a proper response.
@@ -359,9 +615,9 @@ doHandle(State) ->
       {chunk, Headers, Initial} -> {chunk, Headers, Initial};
       %% WebSocket升级
       {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, Headers);
-      %% File
+      %% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
       {HttpCode, Headers, {file, Filename}} ->
-         {file, HttpCode, Headers, Filename, {0, 0}};
+         {file, HttpCode, Headers, Filename, []};
       {HttpCode, Headers, {file, Filename, Range}} ->
          {file, HttpCode, Headers, Filename, Range};
       %% Simple
@@ -386,33 +642,46 @@ doHandle(State) ->
    end.
 
 %% Inject compression for normal responses
-doResponse({response, Code, UserHeaders, Body}, Socket, TemHeader, Method) ->
-   {SBody, NUserHeaders} = tryCompressResponse(Body, UserHeaders, TemHeader, Code, Method),
-   %% Recalculate Content-Length after potential compression
-   NHeaders = lists:keystore(<<"Content-Length">>, 1, NUserHeaders, {<<"Content-Length">>, iolist_size(SBody)}),
-   Headers = [connection(NHeaders, TemHeader) | NHeaders],
+doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version) ->
+   Norm0 = normalizeH1Headers(UserHeaders0),
+   {SBody, UserHeaders1} = tryCompressResponse(Body, Norm0, ReqHeaders, Code, Method),
+   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
+      deleteHeader(<<"Content-Length">>, UserHeaders1)),
+   NHeaders = normalizeContentLength(Code, Method, iolist_size(SBody), UserHeaders),
+   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
+   Headers = addConnectionHeader(NHeaders, Policy, Version),
    sendResponse(Socket, Method, Code, Headers, SBody),
-   closeOrKeepAlive(NUserHeaders, TemHeader);
-doResponse({chunk, UserHeaders, Initial}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [transferEncoding(UserHeaders), connection(UserHeaders, TemHeader) | UserHeaders],
+   Policy;
+doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) ->
+   UserHeaders = deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0)),
+   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
+   ResponseHeaders = addConnectionHeader([transferEncoding(UserHeaders) | UserHeaders], Policy, Version),
    sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
    case Method of
       'HEAD' ->
-         ok;
+         Policy;
       _ ->
-         Initial =:= <<"">> orelse sendChunk(Socket, Initial),
-         case startChunkLoop(Socket) of
-            {error, client_closed} -> client;
-            ok -> server
+         %% 客户端在流式响应过程中断开时必须结束连接进程。
+         %% 之前把 chunk loop 的结果丢掉、总是返回 keep-alive，进程会泄漏。
+         Sent = (Initial =:= <<>> orelse Initial =:= <<"">>) orelse sendChunk(Socket, Initial),
+         case Sent of
+            {error, _} ->
+               close;
+            _ ->
+               case startChunkLoop(Socket) of
+                  ok -> Policy;
+                  {error, _} -> close
+               end
          end
-   end,
-   closeOrKeepAlive(UserHeaders, TemHeader);
+   end;
 %% WebSocket升级响应
-doResponse({wsWebSocket, UserHeaders}, Socket, _TemHeader, _Method) ->
-   sendResponse(Socket, 'GET', 101, UserHeaders, <<>>),
+doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version) ->
+   sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>),
    keep_ws;
-doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader, Method) ->
-   ResponseHeaders = [connection(UserHeaders, TemHeader) | UserHeaders],
+doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version) ->
+   Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
+   UserHeaders = deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0)),
+   ResponseHeaders = addConnectionHeader(UserHeaders, Policy, Version),
    case wsUtil:fileSize(Filename) of
       {error, _FileError} ->
          sendSrvError(Socket),
@@ -421,22 +690,40 @@ doResponse({file, ResponseCode, UserHeaders, Filename, Range}, Socket, TemHeader
          Ret =
             case wsUtil:normalizeRange(Range, Size) of
                undefined ->
-                  sendFile(Socket, ResponseCode, [{<<"Content-Length">>, Size} | ResponseHeaders], Filename, {0, 0});
+                  FileHeaders = [{<<"Content-Length">>, Size} | ResponseHeaders],
+                  case Method of
+                     'HEAD' -> sendResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
+                     _ -> sendFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
+                  end;
                {Offset, Length} ->
                   ERange = wsUtil:encodeRange({Offset, Length}, Size),
-                  sendFile(Socket, 206, lists:append(ResponseHeaders, [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange}]), Filename, {Offset, Length});
+                  FileHeaders = [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange} | ResponseHeaders],
+                  case Method of
+                     'HEAD' -> sendResponse(Socket, Method, 206, FileHeaders, <<>>);
+                     _ -> sendFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
+                  end;
                invalid_range ->
                   ERange = wsUtil:encodeRange(invalid_range, Size),
-                  sendResponse(Socket, Method, 416, lists:append(ResponseHeaders, [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange}]), <<>>),
-                  {error, range}
+                  sendResponse(Socket, Method, 416,
+                     [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>),
+                  ok
             end,
          case Ret of
-            ok ->
-               closeOrKeepAlive(UserHeaders, TemHeader);
-            _Err ->
-               {stop, Ret}
+            ok -> Policy;
+            _Err -> {stop, Ret}
          end
    end.
+
+normalizeContentLength(Code, _Method, _BodySize, Headers) when Code >= 100, Code < 200 ->
+   Headers;
+normalizeContentLength(204, _Method, _BodySize, Headers) ->
+   Headers;
+normalizeContentLength(304, _Method, _BodySize, Headers) ->
+   Headers;
+normalizeContentLength(205, _Method, _BodySize, Headers) ->
+   [{<<"Content-Length">>, 0} | Headers];
+normalizeContentLength(_Code, _Method, BodySize, Headers) ->
+   [{<<"Content-Length">>, BodySize} | Headers].
 
 %% @doc Generate a HTTP response and send it to the client.
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
@@ -449,6 +736,8 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
                304 ->
                   <<>>;
                204 ->
+                  <<>>;
+               205 ->
                   <<>>;
                _ ->
                   UserBody
@@ -465,10 +754,11 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
 
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
-   %% skip when no body should be sent
-   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 304),
-   case Skip orelse iolist_size(Body) =:= 0 of
-      true -> {Body, UserHeaders};
+   BodySize = iolist_size(Body),
+   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205) orelse (Code =:= 304) orelse BodySize < 1024,
+   case Skip of
+      true ->
+         {Body, UserHeaders};
       false ->
          case lists:keyfind(<<"Content-Encoding">>, 1, UserHeaders) of
             false ->
@@ -491,37 +781,77 @@ chooseContentEncoding(ReqHeaders) ->
    case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
       false ->
          none;
-      {_, V} ->
-         Lower = lowerBin(V),
-         case binary:match(Lower, <<"gzip">>) of
-            nomatch ->
-               case binary:match(Lower, <<"deflate">>) of
-                  nomatch ->
-                     none;
-                  _ ->
-                     deflate
-               end;
-            _ ->
-               gzip
+      {_, Value} ->
+         Encodings = parseAcceptEncodings(iolist_to_binary(Value)),
+         GzipQ = encodingQ(<<"gzip">>, Encodings),
+         DeflateQ = encodingQ(<<"deflate">>, Encodings),
+         case {GzipQ, DeflateQ} of
+            {G, D} when G > 0, G >= D -> gzip;
+            {_G, D} when D > 0 -> deflate;
+            _ -> none
          end
    end.
 
-lowerBin(Bin) when is_binary(Bin) ->
-   string:lowercase(Bin);
-lowerBin(L) when is_list(L) ->
-   list_to_binary(string:lowercase(L)).
+parseAcceptEncodings(Value) ->
+   [
+      begin
+         Parts = [string:trim(P) || P <- binary:split(string:lowercase(Token), <<";">>, [global])],
+         case Parts of
+            [Encoding] -> {Encoding, 1000};
+            [Encoding | Params] -> {Encoding, parseEncodingQ(Params)}
+         end
+      end
+      || Token <- binary:split(Value, <<",">>, [global])
+   ].
+
+parseEncodingQ(Params) ->
+   case [V || P <- Params, [K, V] <- [binary:split(P, <<"=">>)], string:trim(K) =:= <<"q">>] of
+      [Q | _] -> qValue(string:trim(Q));
+      [] -> 1000
+   end.
+
+qValue(<<"0">>) -> 0;
+qValue(<<"1">>) -> 1000;
+qValue(<<"0.", Digits/binary>>) -> fractionQ(Digits);
+qValue(<<"1.", Digits/binary>>) ->
+   case allZero(Digits) of true -> 1000; false -> 0 end;
+qValue(_) -> 0.
+
+fractionQ(Digits0) ->
+   Digits = binary:part(<<Digits0/binary, "000">>, 0, 3),
+   try binary_to_integer(Digits) catch _:_ -> 0 end.
+
+allZero(<<>>) -> true;
+allZero(<<$0, Rest/binary>>) -> allZero(Rest);
+allZero(_) -> false.
+
+encodingQ(Name, Encodings) ->
+   case lists:keyfind(Name, 1, Encodings) of
+      {_, Q} -> Q;
+      false ->
+         case lists:keyfind(<<"*">>, 1, Encodings) of
+            {_, Q} -> Q;
+            false -> 0
+         end
+   end.
 
 addVary(Hs) ->
    case lists:keyfind(<<"Vary">>, 1, Hs) of
-      false -> [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
-      _ -> Hs
+      false ->
+         [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
+      {_, Value} ->
+         Tokens = [string:trim(T) || T <- binary:split(iolist_to_binary(Value), <<",">>, [global])],
+         case lists:member(<<"Accept-Encoding">>, Tokens) of
+            true -> Hs;
+            false -> lists:keyreplace(<<"Vary">>, 1, Hs, {<<"Vary">>, [Value, <<", Accept-Encoding">>]})
+         end
    end.
 
 %% @doc Send a HTTP response to the client where the body is the
 %% contents of the given file. Assumes correctly set response code
 %% and headers.
--spec sendFile(Req, Code, Headers, Filename, Range) -> ok when
-   Req :: wsReq(),
+-spec sendFile(Socket, Code, Headers, Filename, Range) -> ok | {error, term()} when
+   Socket :: wsSocket(),
    Code :: wsHttpCode(),
    Headers :: wsHeaders(),
    Filename :: file:filename(),
@@ -579,6 +909,18 @@ chunkLoop(Socket) ->
    receive
       {tcp_closed, Socket} ->
          {error, client_closed};
+      {ssl_closed, Socket} ->
+         {error, client_closed};
+      {tcp_error, Socket, _Reason} ->
+         {error, client_closed};
+      {ssl_error, Socket, _Reason} ->
+         {error, client_closed};
+      {tcp_passive, Socket} ->
+         wsNet:setopts(Socket, [{active, ?ActionN}]),
+         ?MODULE:chunkLoop(Socket);
+      {ssl_passive, Socket} ->
+         wsNet:setopts(Socket, [{active, ?ActionN}]),
+         ?MODULE:chunkLoop(Socket);
       {chunk, close} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
@@ -606,8 +948,6 @@ chunkLoop(Socket) ->
                From ! {self(), {error, closed}}
          end,
          ?MODULE:chunkLoop(Socket)
-   after 10000 ->
-      ?MODULE:chunkLoop(Socket)
    end.
 
 sendChunk(Socket, Data) ->
@@ -619,15 +959,23 @@ sendChunk(Socket, Data) ->
    end.
 
 maybeSendContinue(Socket, Headers) ->
-   % According to RFC2616 section 8.2.3 an origin server must respond with
-   % either a "100 Continue" or a final response code when the client
-   % headers contains "Expect:100-continue"
-   case lists:keyfind(<<"Expect">>, 1, Headers) of
-      <<"100-continue">> ->
-         Response = httpResponse(100),
-         wsNet:send(Socket, Response);
-      _Other ->
-         ok
+   %% decode_packet 已知头表不含 Expect，未收录头以 binary 键返回。
+   case getExpect(Headers) of
+      undefined ->
+         ok;
+      Value ->
+         case wsUtil:toLowerStr(iolist_to_binary(Value)) of
+            <<"100-continue">> ->
+               wsNet:send(Socket, httpResponse(100));
+            _ ->
+               ok
+         end
+   end.
+
+getExpect(Headers) ->
+   case wsUtil:getHeader('Expect', Headers, undefined) of
+      undefined -> wsUtil:getHeader(<<"Expect">>, Headers, undefined);
+      Value -> Value
    end.
 
 httpResponse(Code) ->
@@ -640,7 +988,18 @@ httpResponse(Code, Headers, Body) ->
    [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
 
 spellHeaders(Headers) ->
-   <<<<Key/binary, ": ", (toBinStr(Value))/binary, "\r\n">> || {Key, Value} <- Headers>>.
+   [[toBinStr(Key), <<": ">>, toBinStr(Value), <<"\r\n">>]
+      || {Key, Value} <- Headers, Key =/= <<>>, Key =/= ''] .
+
+%% 响应头键统一成 binary，便于后续 keydelete / keyfind。
+normalizeH1Headers(Headers) ->
+   [{toBinStr(Key), Value} || {Key, Value} <- Headers].
+
+deleteHeader(Name, Headers) when is_binary(Name) ->
+   lists:filter(fun
+      ({Key, _}) -> toBinStr(Key) =/= Name;
+      (_) -> true
+   end, Headers).
 
 -spec splitArgs(binary()) -> list({binary(), binary() | true}).
 splitArgs(<<>>) -> [];
@@ -655,33 +1014,36 @@ toBinStr(V) when is_list(V) -> list_to_binary(V);
 toBinStr(V) when is_atom(V) -> atom_to_binary(V).
 
 closeOrKeepAlive(UserHeaders, ReqHeader) ->
-   case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
-      {_, <<"Close">>} ->
+   connectionPolicy(UserHeaders, ReqHeader, {1, 1}).
+
+connectionPolicy(UserHeaders, ReqHeaders, Version) ->
+   RespClose = headerHasToken(<<"Connection">>, UserHeaders, <<"close">>),
+   ReqClose = headerHasToken('Connection', ReqHeaders, <<"close">>),
+   ReqKeep = headerHasToken('Connection', ReqHeaders, <<"keep-alive">>),
+   case RespClose orelse ReqClose of
+      true ->
          close;
-      {_, <<"close">>} ->
-         close;
-      _ ->
-         case lists:keyfind('Connection', 1, ReqHeader) of
-            {_, <<"Close">>} ->
-               close;
-            {_, <<"close">>} ->
-               close;
-            _ ->
-               keep_alive
-         end
+      false when Version =:= {1, 0} ->
+         case ReqKeep of true -> keep_alive; false -> close end;
+      false ->
+         keep_alive
    end.
 
-connection(UserHeaders, ReqHeader) ->
-   case lists:keyfind(<<"Connection">>, 1, UserHeaders) of
-      false ->
-         case lists:keyfind('Connection', 1, ReqHeader) of
-            false ->
-               {<<"Connection">>, <<"Keep-Alive">>};
-            {_HKey, HValue} ->
-               {<<"Connection">>, HValue}
-         end;
-      _ ->
-         []
+addConnectionHeader(Headers0, Policy, Version) ->
+   Headers = lists:keydelete(<<"Connection">>, 1, Headers0),
+   case {Policy, Version} of
+      {close, _} -> [{<<"Connection">>, <<"close">>} | Headers];
+      {keep_alive, {1, 0}} -> [{<<"Connection">>, <<"Keep-Alive">>} | Headers];
+      {keep_alive, _} -> Headers
+   end.
+
+headerHasToken(Name, Headers, Wanted) ->
+   case lists:keyfind(Name, 1, Headers) of
+      false -> false;
+      {_, Value} ->
+         Lower = wsUtil:toLowerStr(iolist_to_binary(Value)),
+         Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
+         lists:member(Wanted, Tokens)
    end.
 
 transferEncoding(Headers) ->
@@ -696,6 +1058,7 @@ transferEncoding(Headers) ->
 status(100) -> <<"100 Continue">>;
 status(101) -> <<"101 Switching Protocols">>;
 status(102) -> <<"102 Processing">>;
+status(103) -> <<"103 Early Hints">>;
 status(200) -> <<"200 OK">>;
 status(201) -> <<"201 Created">>;
 status(202) -> <<"202 Accepted">>;
@@ -704,6 +1067,7 @@ status(204) -> <<"204 No Content">>;
 status(205) -> <<"205 Reset Content">>;
 status(206) -> <<"206 Partial Content">>;
 status(207) -> <<"207 Multi-Status">>;
+status(208) -> <<"208 Already Reported">>;
 status(226) -> <<"226 IM Used">>;
 status(300) -> <<"300 Multiple Choices">>;
 status(301) -> <<"301 Moved Permanently">>;
@@ -713,6 +1077,7 @@ status(304) -> <<"304 Not Modified">>;
 status(305) -> <<"305 Use Proxy">>;
 status(306) -> <<"306 Switch Proxy">>;
 status(307) -> <<"307 Temporary Redirect">>;
+status(308) -> <<"308 Permanent Redirect">>;
 status(400) -> <<"400 Bad Request">>;
 status(401) -> <<"401 Unauthorized">>;
 status(402) -> <<"402 Payment Required">>;
@@ -732,6 +1097,7 @@ status(415) -> <<"415 Unsupported Media Type">>;
 status(416) -> <<"416 Requested Range Not Satisfiable">>;
 status(417) -> <<"417 Expectation Failed">>;
 status(418) -> <<"418 I'm a teapot">>;
+status(421) -> <<"421 Misdirected Request">>;
 status(422) -> <<"422 Unprocessable Entity">>;
 status(423) -> <<"423 Locked">>;
 status(424) -> <<"424 Failed Dependency">>;
@@ -740,6 +1106,7 @@ status(426) -> <<"426 Upgrade Required">>;
 status(428) -> <<"428 Precondition Required">>;
 status(429) -> <<"429 Too Many Requests">>;
 status(431) -> <<"431 Request Header Fields Too Large">>;
+status(451) -> <<"451 Unavailable For Legal Reasons">>;
 status(500) -> <<"500 Internal Server Error">>;
 status(501) -> <<"501 Not Implemented">>;
 status(502) -> <<"502 Bad Gateway">>;
@@ -748,7 +1115,9 @@ status(504) -> <<"504 Gateway Timeout">>;
 status(505) -> <<"505 HTTP Version Not Supported">>;
 status(506) -> <<"506 Variant Also Negotiates">>;
 status(507) -> <<"507 Insufficient Storage">>;
+status(508) -> <<"508 Loop Detected">>;
 status(510) -> <<"510 Not Extended">>;
 status(511) -> <<"511 Network Authentication Required">>;
-status(I) when is_integer(I), I >= 100, I < 1000 -> <<(integer_to_binary(I))/binary, "Status">>;
+status(I) when is_integer(I), I >= 100, I < 1000 ->
+   <<(integer_to_binary(I))/binary, " Unknown">>;
 status(B) when is_binary(B) -> B.

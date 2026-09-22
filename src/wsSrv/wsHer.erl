@@ -3,8 +3,8 @@
 -include("eWSrv.hrl").
 
 -export_type([
-	response/0
-	, wsResponse/0
+   response/0
+   , wsResponse/0
 ]).
 
 -type response() ::
@@ -29,24 +29,24 @@
 
 -callback init(Args :: term()) -> {ok, State :: term()} |{stop, Reason :: term()}.
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
-	kpS |
-	{reply, Reply :: term()} |
-	{reply, Reply :: term(), NewState :: term()} |
-	{noreply, NewState :: term()} |
-	{mayReply, Reply :: term()} |
-	{mayReply, Reply :: term(), NewState :: term()} |
-	{stop, Reason :: term(), NewState :: term()} |
-	{stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
+   kpS |
+   {reply, Reply :: term()} |
+   {reply, Reply :: term(), NewState :: term()} |
+   {noreply, NewState :: term()} |
+   {mayReply, Reply :: term()} |
+   {mayReply, Reply :: term(), NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()} |
+   {stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
-	kpS |
-	{noreply, NewState :: term()} |
-	{stop, Reason :: term(), NewState :: term()}.
+   kpS |
+   {noreply, NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleInfo(Info :: timeout | term(), State :: term()) ->
-	kpS |
-	{noreply, NewState :: term()} |
-	{stop, Reason :: term(), NewState :: term()}.
+   kpS |
+   {noreply, NewState :: term()} |
+   {stop, Reason :: term(), NewState :: term()}.
 
 -callback terminate(Reason :: timeout, WebState :: timeout) -> ignore.
 

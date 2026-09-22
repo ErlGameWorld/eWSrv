@@ -4,7 +4,8 @@
 -include("wsCom.hrl").
 
 -export([
-   parseWebSocketFrames/3
+   feed/2
+   , parseWebSocketFrames/3
    , processFrames/2
    , handleUpgrade/2
    , genAcceptKey/1
@@ -14,214 +15,329 @@
    , encodeFrame/1
 ]).
 
-%% WebSocket帧解析
-parseWebSocketFrames(<<>>, _State, Acc) ->
-   {ok, lists:reverse(Acc), <<>>};
-parseWebSocketFrames(Data, State, Acc) ->
-   case parseWebSocketFrame(Data) of
-      {ok, Frame, Rest} ->
-         parseWebSocketFrames(Rest, State, [Frame | Acc]);
-      {incomplete, RemainingData} ->
-         {ok, lists:reverse(Acc), RemainingData}
-   end.
+%% ================================================================================================
+%% Frame parser — 增量状态机，分段到达时不反复整段拷贝
+%% ================================================================================================
 
-parseWebSocketFrame(<<Fin:1, _Rsv:3, Opcode:4, Mask:1, PayloadLen:7, Rest/binary>> = Data) ->
-   case PayloadLen of
-      PayloadLen when PayloadLen < 126 ->
-         PayloadLength = PayloadLen,
-         case parsePayload(Mask, PayloadLength, Rest) of
-            {ok, Frame, Rest3} -> {ok, {Fin, Opcode, Frame}, Rest3};
-            {incomplete, _} -> {incomplete, <<Fin:1, _Rsv:3, Opcode:4, Mask:1, PayloadLen:7, Rest/binary>>};
-            {error, Reason} -> {error, Reason}
-         end;
-      126 ->
-         case Rest of
-            <<PayloadLength:16, Rest2/binary>> ->
-               case parsePayload(Mask, PayloadLength, Rest2) of
-                  {ok, Frame, Rest3} -> {ok, {Fin, Opcode, Frame}, Rest3};
-                  {incomplete, _} -> {incomplete, Data};
-                  {error, Reason} -> {error, Reason}
-               end;
-            _ ->
-               {incomplete, Data}
-         end;
-      127 ->
-         case Rest of
-            <<PayloadLength:64, Rest2/binary>> ->
-               case parsePayload(Mask, PayloadLength, Rest2) of
-                  {ok, Frame, Rest3} -> {ok, {Fin, Opcode, Frame}, Rest3};
-                  {incomplete, _} -> {incomplete, Data};
-                  {error, Reason} -> {error, Reason}
-               end;
-            _ ->
-               {incomplete, Data}
-         end
+%% @doc 喂入一段 TCP 数据。完整帧立即解出；半帧头留在 wsParse={hdr,_}，
+%% 半 payload 用列表累积在 {body,...}，收齐再 iolist_to_binary 一次。
+-spec feed(binary(), #wsState{}) ->
+   {ok, [{0|1, non_neg_integer(), binary()}], #wsState{}} |
+   {close, term()} | {error, term()}.
+feed(Data, State) ->
+   feed(Data, State#wsState.wsParse, State, []).
+
+feed(<<>>, {body, Fin, Opcode, Mask, Need, AccParts, Size}, State, Acc) when Size >= Need ->
+   Payload = case AccParts of
+      [] -> <<>>;
+      [One] -> One;
+      _ -> iolist_to_binary(lists:reverse(AccParts))
+   end,
+   Frame = {Fin, Opcode, unmaskData(Payload, Mask)},
+   feed(<<>>, {hdr, <<>>}, State, [Frame | Acc]);
+feed(<<>>, undefined, State, Acc) ->
+   {ok, lists:reverse(Acc), State#wsState{wsParse = undefined, buffer = <<>>}};
+feed(<<>>, {hdr, <<>>}, State, Acc) ->
+   {ok, lists:reverse(Acc), State#wsState{wsParse = undefined, buffer = <<>>}};
+feed(<<>>, Parse, State, Acc) ->
+   {ok, lists:reverse(Acc), State#wsState{wsParse = Parse, buffer = <<>>}};
+feed(Data, undefined, State, Acc) ->
+   feed(Data, {hdr, <<>>}, State, Acc);
+feed(Data, {hdr, Buf0}, State, Acc) ->
+   Buf = case Buf0 of <<>> -> Data; _ -> <<Buf0/binary, Data/binary>> end,
+   case tryHeader(Buf, State) of
+      {ok, Fin, Opcode, Mask, Len, Rest} ->
+         feed(Rest, {body, Fin, Opcode, Mask, Len, [], 0}, State, Acc);
+      {incomplete, Leftover} ->
+         {ok, lists:reverse(Acc), State#wsState{wsParse = {hdr, Leftover}, buffer = <<>>}};
+      {error, Reason} ->
+         {error, Reason}
    end;
-parseWebSocketFrame(Data) ->
-   {incomplete, Data}.
+feed(Data, {body, Fin, Opcode, Mask, Need, AccParts, Size}, State, Acc) when Size >= Need ->
+   Payload = case AccParts of
+      [] -> <<>>;
+      [One] -> One;
+      _ -> iolist_to_binary(lists:reverse(AccParts))
+   end,
+   Frame = {Fin, Opcode, unmaskData(Payload, Mask)},
+   feed(Data, {hdr, <<>>}, State, [Frame | Acc]);
+feed(Data, {body, Fin, Opcode, Mask, Need, AccParts, Size}, State, Acc) ->
+   Take = erlang:min(byte_size(Data), Need - Size),
+   <<Chunk:Take/binary, Rest/binary>> = Data,
+   feed(Rest, {body, Fin, Opcode, Mask, Need, [Chunk | AccParts], Size + Take}, State, Acc).
 
-parsePayload(Mask, PayloadLength, Data) ->
-   case Mask of
-      1 ->
-         case Data of
-            <<MaskingKey:4/binary, PayloadData:PayloadLength/binary, Rest3/binary>> ->
-               UnmaskedData = unmaskData(PayloadData, MaskingKey),
-               {ok, UnmaskedData, Rest3};
-            _ ->
-               {incomplete, Data}
-         end;
-      0 ->
-         case Data of
-            <<PayloadData:PayloadLength/binary, Rest3/binary>> ->
-               {ok, PayloadData, Rest3};
-            _ ->
-               {incomplete, Data}
-         end
+%% 兼容单测：整段输入一次解析，返回剩余 binary。
+parseWebSocketFrames(Data, State, Acc0) ->
+   case feed(Data, State#wsState{wsParse = undefined, buffer = <<>>}) of
+      {ok, Frames, NState} ->
+         {ok, Acc0 ++ Frames, remainingBytes(NState)};
+      {close, Reason} ->
+         {close, Reason};
+      {error, Reason} ->
+         {close, Reason}
    end.
 
-unmaskData(Data, MaskingKey) ->
-   <<M0:8, M1:8, M2:8, M3:8>> = MaskingKey,
-   unmaskData(Data, M0, M1, M2, M3, 0, byte_size(Data), <<>>).
+remainingBytes(#wsState{wsParse = undefined}) -> <<>>;
+remainingBytes(#wsState{wsParse = {hdr, Bin}}) -> Bin;
+remainingBytes(#wsState{wsParse = {body, _, _, _, _, Acc, _}}) ->
+   iolist_to_binary(lists:reverse(Acc)).
 
-unmaskData(<<>>, _, _, _, _, _, _, Acc) ->
-   Acc;
-unmaskData(Data, M0, M1, M2, M3, Index, Remaining, Acc) when Remaining >= 4 ->
-   <<A:8, B:8, C:8, D:8, Rest/binary>> = Data,
-   MaskA = case Index rem 4 of 0 -> M0; 1 -> M1; 2 -> M2; 3 -> M3 end,
-   MaskB = case (Index + 1) rem 4 of 0 -> M0; 1 -> M1; 2 -> M2; 3 -> M3 end,
-   MaskC = case (Index + 2) rem 4 of 0 -> M0; 1 -> M1; 2 -> M2; 3 -> M3 end,
-   MaskD = case (Index + 3) rem 4 of 0 -> M0; 1 -> M1; 2 -> M2; 3 -> M3 end,
-   Unmasked = <<(A bxor MaskA):8, (B bxor MaskB):8, (C bxor MaskC):8, (D bxor MaskD):8>>,
-   unmaskData(Rest, M0, M1, M2, M3, Index + 4, Remaining - 4, <<Acc/binary, Unmasked/binary>>);
-unmaskData(Data, M0, M1, M2, M3, Index, Remaining, Acc) ->
-   <<Byte:8, Rest/binary>> = Data,
-   MaskByte = case Index rem 4 of 0 -> M0; 1 -> M1; 2 -> M2; 3 -> M3 end,
-   UnmaskedByte = Byte bxor MaskByte,
-   unmaskData(Rest, M0, M1, M2, M3, Index + 1, Remaining - 1, <<Acc/binary, UnmaskedByte:8>>).
+tryHeader(Data, _State) when byte_size(Data) < 2 ->
+   {incomplete, Data};
+tryHeader(<<Fin:1, Rsv:3, Opcode:4, Mask:1, PayloadLen:7, Rest/binary>> = Data, State) ->
+   case validateFrameHeader(Fin, Rsv, Opcode, Mask, PayloadLen) of
+      ok ->
+         tryPayloadLength(PayloadLen, Rest, Data, Fin, Opcode, State);
+      {error, Reason} ->
+         {error, Reason}
+   end.
 
-%% 处理WebSocket帧
-processFrames([], State) -> {ok, State};
-processFrames([{Fin, Opcode, Payload} | Rest], #wsState{socket = Socket, wsMod = WsMod, webState = WebState, fragmented = Fragmented, fragmentedOpcode = FragOpcode, fragmentedBuffer = FragBuffer} = State) ->
-   case Opcode of
-      ?WsOpCF ->
-         if
-            Fragmented ->
-               NewBuffer = <<FragBuffer/binary, Payload/binary>>,
-               if
-                  Fin =:= 1 ->
-                     case doHandleWs(FragOpcode, NewBuffer, WebState, WsMod, Socket) of
-                        {ok, NewWebState} ->
-                           processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-                        {close, Reason, NewWebState} ->
-                           {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
-                     end;
-                  true ->
-                     processFrames(Rest, State#wsState{fragmentedBuffer = NewBuffer})
-               end;
-            true ->
-               ?wsErr("Received continuation frame without prior fragmented frame~n"),
-               processFrames(Rest, State)
-         end;
-      ?WsOpText ->
-         if
-            Fin =:= 1 ->
-               case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
-                  {ok, NewWebState} ->
-                     processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-                  {close, Reason, NewWebState} ->
-                     {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
-               end;
-            true ->
-               processFrames(Rest, State#wsState{fragmented = true, fragmentedOpcode = ?WsOpText, fragmentedBuffer = Payload})
-         end;
-      ?WsOpBinary ->
-         if
-            Fin =:= 1 ->
-               case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
-                  {ok, NewWebState} ->
-                     processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-                  {close, Reason, NewWebState} ->
-                     {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
-               end;
-            true ->
-               processFrames(Rest, State#wsState{fragmented = true, fragmentedOpcode = ?WsOpBinary, fragmentedBuffer = Payload})
-         end;
-      ?WsOpClose ->
-         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
-            {ok, NewWebState} ->
-               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-            {close, Reason, NewWebState} ->
-               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
-         end;
-      ?WsOpPing ->
-         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
-            {ok, NewWebState} ->
-               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-            {close, Reason, NewWebState} ->
-               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
-         end;
-      ?WsOpPong ->
-         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
-            {ok, NewWebState} ->
-               processFrames(Rest, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState});
-            {close, Reason, NewWebState} ->
-               {close, Reason, State#wsState{fragmented = false, fragmentedBuffer = <<>>, webState = NewWebState}}
+validateFrameHeader(_Fin, Rsv, _Opcode, _Mask, _PayloadLen) when Rsv =/= 0 ->
+   {error, protocol_error};
+validateFrameHeader(_Fin, _Rsv, Opcode, _Mask, _PayloadLen)
+   when Opcode =/= ?WsOpCF, Opcode =/= ?WsOpText, Opcode =/= ?WsOpBinary,
+        Opcode =/= ?WsOpClose, Opcode =/= ?WsOpPing, Opcode =/= ?WsOpPong ->
+   {error, protocol_error};
+validateFrameHeader(_Fin, _Rsv, _Opcode, 0, _PayloadLen) ->
+   {error, protocol_error};
+validateFrameHeader(0, _Rsv, Opcode, _Mask, _PayloadLen) when Opcode >= 8 ->
+   {error, protocol_error};
+validateFrameHeader(_Fin, _Rsv, Opcode, _Mask, PayloadLen) when Opcode >= 8, PayloadLen > 125 ->
+   {error, protocol_error};
+validateFrameHeader(_Fin, _Rsv, _Opcode, _Mask, _PayloadLen) ->
+   ok.
+
+tryPayloadLength(PayloadLen, Rest, Data, Fin, Opcode, State) when PayloadLen < 126 ->
+   takeMaskAndLen(PayloadLen, Rest, Data, Fin, Opcode, State);
+tryPayloadLength(126, Rest, Data, Fin, Opcode, State) ->
+   case Rest of
+      <<PayloadLength:16, Rest2/binary>> ->
+         case PayloadLength >= 126 of
+            true -> takeMaskAndLen(PayloadLength, Rest2, Data, Fin, Opcode, State);
+            false -> {error, protocol_error}
          end;
       _ ->
-         ?wsErr("Unknown WebSocket opcode: ~p~n", [Opcode]),
-         processFrames(Rest, State)
+         {incomplete, Data}
+   end;
+tryPayloadLength(127, Rest, Data, Fin, Opcode, State) ->
+   case Rest of
+      <<0:1, PayloadLength:63, Rest2/binary>> ->
+         case PayloadLength > 16#FFFF of
+            true -> takeMaskAndLen(PayloadLength, Rest2, Data, Fin, Opcode, State);
+            false -> {error, protocol_error}
+         end;
+      <<_High:1, _/bitstring>> ->
+         {error, protocol_error};
+      _ ->
+         {incomplete, Data}
+   end.
+
+takeMaskAndLen(PayloadLength, _Rest, _Data, _Fin, _Opcode,
+   #wsState{maxWsFrameSize = MaxFrame}) when PayloadLength > MaxFrame ->
+   {error, message_too_big};
+takeMaskAndLen(PayloadLength, Rest, Data, Fin, Opcode, _State) ->
+   case Rest of
+      <<MaskingKey:4/binary, AfterMask/binary>> ->
+         {ok, Fin, Opcode, MaskingKey, PayloadLength, AfterMask};
+      _ ->
+         {incomplete, Data}
+   end.
+
+%% 掩码 4 字节周期且从 index 0 对齐，整字异或；尾部 0~3 字节逐字节处理。
+unmaskData(<<>>, _Mask) -> <<>>;
+unmaskData(Data, <<M0:8, M1:8, M2:8, M3:8>>) ->
+   M32 = (M0 bsl 24) bor (M1 bsl 16) bor (M2 bsl 8) bor M3,
+   unmaskWords(Data, M32, M0, M1, M2, M3, <<>>).
+
+unmaskWords(<<W:32, Rest/binary>>, M32, M0, M1, M2, M3, Acc) ->
+   unmaskWords(Rest, M32, M0, M1, M2, M3, <<Acc/binary, (W bxor M32):32>>);
+unmaskWords(<<A:8, B:8, C:8>>, _M32, M0, M1, M2, _M3, Acc) ->
+   <<Acc/binary, (A bxor M0):8, (B bxor M1):8, (C bxor M2):8>>;
+unmaskWords(<<A:8, B:8>>, _M32, M0, M1, _M2, _M3, Acc) ->
+   <<Acc/binary, (A bxor M0):8, (B bxor M1):8>>;
+unmaskWords(<<A:8>>, _M32, M0, _M1, _M2, _M3, Acc) ->
+   <<Acc/binary, (A bxor M0):8>>;
+unmaskWords(<<>>, _M32, _M0, _M1, _M2, _M3, Acc) ->
+   Acc.
+
+%% ================================================================================================
+%% Frame processing / fragmentation
+%% ================================================================================================
+
+processFrames([], State) ->
+   {ok, State};
+processFrames([{Fin, Opcode, Payload} | Rest], State) when Opcode >= 8 ->
+   processControlFrame(Fin, Opcode, Payload, Rest, State);
+processFrames([{Fin, Opcode, Payload} | Rest], State) ->
+   processDataFrame(Fin, Opcode, Payload, Rest, State).
+
+processControlFrame(1, ?WsOpPing, Payload, Rest, #wsState{socket = Socket} = State) ->
+   %% Ping/Pong允许穿插在fragmented message中，绝不能清空fragment状态。
+   case sendFrame(Socket, ?WsOpPong, Payload) of
+      ok -> processFrames(Rest, State);
+      {error, Reason} -> {close, Reason, State}
+   end;
+processControlFrame(1, ?WsOpPong, Payload, Rest, State) ->
+   case notifyControl(?WsOpPong, Payload, State) of
+      {ok, NState} -> processFrames(Rest, NState);
+      Close -> Close
+   end;
+processControlFrame(1, ?WsOpClose, Payload, _Rest, #wsState{socket = Socket} = State) ->
+   case validateClosePayload(Payload) of
+      ok ->
+         %% 收到Close后回显Close payload，完成closing handshake。
+         _ = sendFrame(Socket, ?WsOpClose, Payload),
+         {close, normal, State};
+      {error, Reason} ->
+         {close, Reason, State}
+   end;
+processControlFrame(_Fin, _Opcode, _Payload, _Rest, State) ->
+   {close, protocol_error, State}.
+
+processDataFrame(Fin, ?WsOpCF, Payload, Rest, #wsState{fragmented = true, fragmentedOpcode = FragOpcode, fragmentedBuffer = FragAcc, fragmentedSize = Size0, maxWsMessageSize = MaxMessage} = State) ->
+   Size = Size0 + byte_size(Payload),
+   case Size > MaxMessage of
+      true ->
+         {close, message_too_big, State};
+      false when Fin =:= 0 ->
+         processFrames(Rest, State#wsState{fragmentedBuffer = [Payload | FragAcc], fragmentedSize = Size});
+      false ->
+         Message = iolist_to_binary(lists:reverse([Payload | FragAcc])),
+         Cleared = clearFragment(State),
+         case validateMessage(FragOpcode, Message) of
+            ok ->
+               case doHandleWs(FragOpcode, Message, Cleared#wsState.webState, Cleared#wsState.wsMod, Cleared#wsState.socket) of
+                  {ok, NewWebState} ->
+                     processFrames(Rest, Cleared#wsState{webState = NewWebState});
+                  {close, Reason, NewWebState} ->
+                     {close, Reason, Cleared#wsState{webState = NewWebState}}
+               end;
+            {error, Reason} ->
+               {close, Reason, Cleared}
+         end
+   end;
+processDataFrame(_Fin, ?WsOpCF, _Payload, _Rest, State) ->
+   {close, protocol_error, State};
+
+processDataFrame(_Fin, Opcode, _Payload, _Rest, #wsState{fragmented = true} = State)
+   when Opcode =:= ?WsOpText; Opcode =:= ?WsOpBinary ->
+   %% 一个fragmented message完成前不能开始新的data message。
+   {close, protocol_error, State};
+
+processDataFrame(Fin, Opcode, Payload, Rest, #wsState{maxWsMessageSize = MaxMessage} = State)
+   when Opcode =:= ?WsOpText; Opcode =:= ?WsOpBinary ->
+   Size = byte_size(Payload),
+   case Size > MaxMessage of
+      true ->
+         {close, message_too_big, State};
+      false when Fin =:= 0 ->
+         processFrames(Rest, State#wsState{fragmented = true, fragmentedOpcode = Opcode, fragmentedBuffer = [Payload], fragmentedSize = Size});
+      false ->
+         case validateMessage(Opcode, Payload) of
+            ok ->
+               case doHandleWs(Opcode, Payload, State#wsState.webState, State#wsState.wsMod, State#wsState.socket) of
+                  {ok, NewWebState} ->
+                     processFrames(Rest, State#wsState{webState = NewWebState});
+                  {close, Reason, NewWebState} ->
+                     {close, Reason, State#wsState{webState = NewWebState}}
+               end;
+            {error, Reason} ->
+               {close, Reason, State}
+         end
+   end;
+processDataFrame(_Fin, _Opcode, _Payload, _Rest, State) ->
+   {close, protocol_error, State}.
+
+clearFragment(State) ->
+   State#wsState{fragmented = false, fragmentedOpcode = undefined, fragmentedBuffer = [], fragmentedSize = 0}.
+
+validateMessage(?WsOpText, Payload) ->
+   validateUtf8(Payload);
+validateMessage(?WsOpBinary, _Payload) ->
+   ok.
+
+validateUtf8(Bin) ->
+   case unicode:characters_to_binary(Bin, utf8, utf8) of
+      Converted when is_binary(Converted) -> ok;
+      _ -> {error, invalid_utf8}
+   end.
+
+validateClosePayload(<<>>) ->
+   ok;
+validateClosePayload(<<_OneByte>>) ->
+   {error, protocol_error};
+validateClosePayload(<<Code:16, Reason/binary>>) ->
+   case validCloseCode(Code) of
+      false -> {error, protocol_error};
+      true -> validateUtf8(Reason)
+   end.
+
+validCloseCode(Code) when Code >= 1000, Code =< 1014, Code =/= 1004, Code =/= 1005, Code =/= 1006 -> true;
+validCloseCode(Code) when Code >= 3000, Code =< 4999 -> true;
+validCloseCode(_) -> false.
+
+notifyControl(Opcode, Payload, #wsState{wsMod = WsMod, webState = WebState, socket = Socket} = State) ->
+   case erlang:function_exported(WsMod, handleWs, 3) of
+      false ->
+         {ok, State};
+      true ->
+         case doHandleWs(Opcode, Payload, WebState, WsMod, Socket) of
+            {ok, NewWebState} -> {ok, State#wsState{webState = NewWebState}};
+            {close, Reason, NewWebState} -> {close, Reason, State#wsState{webState = NewWebState}}
+         end
    end.
 
 doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
-   try WsMod:handleWs(FragOpcode, Payload, WebState) of
-      {ok, NWebState} ->
-         {ok, NWebState};
-      {ok, RetBody, NWebState} ->
-         sendFrame(Socket, ?WsOpBinary, RetBody),
-         {ok, NWebState};
-      {ok, ROpCode, RetBody, NWebState} ->
-         sendFrame(Socket, ROpCode, RetBody),
-         {ok, NWebState};
-      {close, NWebState} ->
-         {close, normal, NWebState};
-      {close, Reason, NWebState} ->
-         {close, Reason, NWebState};
-      {stop, Reason, NWebState} ->
-         {close, Reason, NWebState};
-      %% Unexpected
-      Unexpected ->
-         ?wsErr("handleWs return error FragOpcode:~p WebState:~p Unexpected:~p Payload:~p ~n", [FragOpcode, WebState, Unexpected, Payload]),
-         {ok, WebState}
-   catch
-      throw:{ROpCode, RetBody, NWebState} when is_integer(ROpCode) ->
-         sendFrame(Socket, ROpCode, RetBody),
-         {ok, NWebState};
-      throw:{ok, NWebState} ->
-         {ok, NWebState};
-      throw:{close, NWebState} ->
-         {close, normal, NWebState};
-      throw:{close, Reason, NWebState} ->
-         {close, Reason, NWebState};
-      throw:{stop, Reason, NWebState} ->
-         {close, Reason, NWebState};
-      throw:Exc:Stacktrace ->
-         ?wsErr("handleWs catch throw FragOpcode:~p WebState:~p Payload:~p throw:~p S:~p~n", [FragOpcode, WebState, Payload, Exc, Stacktrace]),
+   case erlang:function_exported(WsMod, handleWs, 3) of
+      false ->
          {ok, WebState};
-      error:Error:Stacktrace ->
-         ?wsErr("handleWs catch error FragOpcode:~p WebState:~p Payload:~p Error:~p S:~p~n", [FragOpcode, WebState, Payload, Error, Stacktrace]),
-         {ok, WebState};
-      exit:Exit:Stacktrace ->
-         ?wsErr("handleWs catch exit FragOpcode:~p WebState:~p Payload:~p Exit:~p S:~p~n", [FragOpcode, WebState, Payload, Exit, Stacktrace]),
-         {ok, WebState}
+      true ->
+         try WsMod:handleWs(FragOpcode, Payload, WebState) of
+            {ok, NWebState} ->
+               {ok, NWebState};
+            {ok, RetBody, NWebState} ->
+               _ = sendFrame(Socket, ?WsOpBinary, RetBody),
+               {ok, NWebState};
+            {ok, ROpCode, RetBody, NWebState} ->
+               _ = sendFrame(Socket, ROpCode, RetBody),
+               {ok, NWebState};
+            {close, NWebState} ->
+               {close, normal, NWebState};
+            {close, Reason, NWebState} ->
+               {close, Reason, NWebState};
+            {stop, Reason, NWebState} ->
+               {close, Reason, NWebState};
+            Unexpected ->
+               ?wsErr("handleWs return error FragOpcode:~p WebState:~p Unexpected:~p~n",
+                  [FragOpcode, WebState, Unexpected]),
+               {ok, WebState}
+         catch
+            throw:{ROpCode, RetBody, NWebState} when is_integer(ROpCode) ->
+               _ = sendFrame(Socket, ROpCode, RetBody),
+               {ok, NWebState};
+            throw:{ok, NWebState} ->
+               {ok, NWebState};
+            throw:{close, NWebState} ->
+               {close, normal, NWebState};
+            throw:{close, Reason, NWebState} ->
+               {close, Reason, NWebState};
+            throw:{stop, Reason, NWebState} ->
+               {close, Reason, NWebState};
+            Class:Reason:Stacktrace ->
+               ?wsErr("handleWs exception opcode:~p class:~p reason:~p stack:~p~n",
+                  [FragOpcode, Class, Reason, Stacktrace]),
+               {ok, WebState}
+         end
    end.
 
-sendFrame(Socket, Opcode, Payload) ->
-   FrameBin = encodeFrame(Opcode, Payload),
-   wsNet:send(Socket, FrameBin).
+sendFrame(Socket, Opcode, Payload0) ->
+   wsNet:send(Socket, encodeFrame(Opcode, Payload0)).
 
 encodeFrame(Payload) ->
    encodeFrame(?WsOpBinary, Payload).
-encodeFrame(Opcode, Payload) ->
+
+encodeFrame(Opcode, Payload0) ->
+   Payload = iolist_to_binary(Payload0),
    PayloadLen = byte_size(Payload),
    if
       PayloadLen < 126 ->
@@ -232,92 +348,73 @@ encodeFrame(Opcode, Payload) ->
          <<1:1, 0:3, Opcode:4, 0:1, 127:7, PayloadLen:64, Payload/binary>>
    end.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% @doc 处理WebSocket升级请求
+%% ================================================================================================
+%% Upgrade handshake
+%% ================================================================================================
+
 -spec handleUpgrade(WsMod :: module(), BaseHeaders :: list()) -> {wsWebSocket, list()}.
-handleUpgrade(WsMod, BaseHeaders) ->
-   %% 添加WebSocket协议支持（如果模块支持）
-   ProtocolHeaders = case erlang:function_exported(WsMod, supportedProtocols, 0) of
-      true ->
-         Protocols = WsMod:supportedProtocols(),
-         case Protocols of
-            [] -> [];
-            _ ->
-               <<_:8, ProtocolsStr/binary>> = <<<<",", OneP/binary>> || OneP <- Protocols>>,
-               [{<<"Sec-Websocket-Protocol">>, ProtocolsStr}]
-         end;
-      _ ->
-         []
-   end,
+handleUpgrade(_WsMod, BaseHeaders) ->
+   %% Subprotocol/extension必须从客户端offer中协商后才能返回。
+   %% 当前公共API没有把offer传到这里，因此宁可不声明，也不能无条件声明服务端列表。
+   {wsWebSocket, BaseHeaders}.
 
-   %% 添加WebSocket扩展支持（如果模块支持）
-   ExtensionHeaders = case erlang:function_exported(WsMod, supportedExtensions, 0) of
-      true ->
-         Extensions = WsMod:supportedExtensions(),
-         case Extensions of
-            [] -> [];
-            _ ->
-               <<_:8, ExtensionsStr/binary>> = <<<<",", OneE/binary>> || OneE <- Extensions>>,
-               [{<<"Sec-Websocket-Extensions">>, ExtensionsStr}]
-         end;
-      _ -> []
-   end,
-   %% 构建升级响应头
-   ResponseHeaders = ProtocolHeaders ++ ExtensionHeaders ++ BaseHeaders,
-   %% 返回升级响应
-   {wsWebSocket, ResponseHeaders}.
-
-%% @doc 生成WebSocket Accept Key
 -spec genAcceptKey(binary()) -> binary().
 genAcceptKey(Key) ->
    Combined = <<Key/binary, ?WS_GUID/binary>>,
    Hash = crypto:hash(sha, Combined),
    base64:encode(Hash).
 
-%% @doc 检查是否为WebSocket升级请求
 -spec tryWsUpgrade(#wsReq{}) -> {ok, list()} | {error, binary()}.
 tryWsUpgrade(WsReq) ->
-   #wsReq{method = Method, headers = Headers} = WsReq,
+   #wsReq{method = Method, version = HttpVersion, headers = Headers} = WsReq,
    Connection = wsUtil:getHeader('Connection', Headers, undefined),
    Upgrade = wsUtil:getHeader('Upgrade', Headers, undefined),
    Version = wsUtil:getHeader(<<"Sec-Websocket-Version">>, Headers, undefined),
    Key = wsUtil:getHeader(<<"Sec-Websocket-Key">>, Headers, undefined),
-   case validateConditions(Method, Connection, Upgrade, Version, Key) of
+   case validateConditions(Method, HttpVersion, Connection, Upgrade, Version, Key) of
       ok ->
          AcceptKey = genAcceptKey(Key),
-         WsHeaders = [{<<"Upgrade">>, <<"websocket">>},
+         WsHeaders = [
+            {<<"Upgrade">>, <<"websocket">>},
             {<<"Connection">>, <<"Upgrade">>},
-            {<<"Sec-Websocket-Accept">>, AcceptKey}],
+            {<<"Sec-Websocket-Accept">>, AcceptKey}
+         ],
          {ok, WsHeaders};
-      Error -> Error
+      Error ->
+         Error
    end.
 
-%% 内部验证函数
-validateConditions(Method, Connection, Upgrade, Version, Key) ->
+validateConditions(Method, HttpVersion, Connection, Upgrade, Version, Key) ->
    maybe
-      ok  ?= case Method of 'GET' -> ok;_ -> {error, <<"method_not_allowed">>} end,
-      ok  ?= case is_upgrade_connection(Connection) of true -> ok; false -> {error, <<"invalid_connection">>} end,
-      ok  ?=  case is_websocket_upgrade(Upgrade) of true -> ok; false -> {error, <<"invalid_upgrade">>} end,
-      ok  ?=  case is_supported_version(Version) of true -> ok; false -> {error, <<"unsupported_version">>} end,
-      ok  ?=  case is_valid_key(Key) of true -> ok; false -> {error, <<"invalid_key">>} end
+      ok ?= case Method of 'GET' -> ok; _ -> {error, <<"method_not_allowed">>} end,
+      ok ?= case HttpVersion >= {1, 1} of true -> ok; false -> {error, <<"http_version_not_supported">>} end,
+      ok ?= case isUpgradeConnection(Connection) of true -> ok; false -> {error, <<"invalid_connection">>} end,
+      ok ?= case isWebsocketUpgrade(Upgrade) of true -> ok; false -> {error, <<"invalid_upgrade">>} end,
+      ok ?= case isSupportedVersion(Version) of true -> ok; false -> {error, <<"unsupported_version">>} end,
+      ok ?= case isValidKey(Key) of true -> ok; false -> {error, <<"invalid_key">>} end
    end.
 
-%% 检查Connection头是否包含"upgrade"
-is_upgrade_connection(undefined) -> false;
-is_upgrade_connection(Connection) ->
-   binary:match(wsUtil:toLowerStr(Connection), <<"upgrade">>) /= nomatch.
+isUpgradeConnection(undefined) ->
+   false;
+isUpgradeConnection(Connection) ->
+   Lower = wsUtil:toLowerStr(iolist_to_binary(Connection)),
+   Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
+   lists:member(<<"upgrade">>, Tokens).
 
-%% 检查Upgrade头是否为"websocket"
-is_websocket_upgrade(undefined) -> false;
-is_websocket_upgrade(Upgrade) -> wsUtil:toLowerStr(Upgrade) =:= <<"websocket">>.
+isWebsocketUpgrade(undefined) ->
+   false;
+isWebsocketUpgrade(Upgrade) ->
+   wsUtil:toLowerStr(string:trim(iolist_to_binary(Upgrade))) =:= <<"websocket">>.
 
-%% 检查WebSocket版本是否支持
-is_supported_version(undefined) -> false;
-is_supported_version(Version) -> Version =:= ?WS_VERSION.
+isSupportedVersion(undefined) ->
+   false;
+isSupportedVersion(Version) ->
+   string:trim(iolist_to_binary(Version)) =:= ?WS_VERSION.
 
-%% 检查WebSocket Key是否有效 Key必须是16字节的base64编码
-is_valid_key(undefined) -> false;
-is_valid_key(Key) ->
+isValidKey(undefined) ->
+   false;
+isValidKey(Key0) ->
+   Key = string:trim(iolist_to_binary(Key0)),
    try
       Decoded = base64:decode(Key),
       byte_size(Decoded) =:= 16

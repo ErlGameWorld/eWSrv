@@ -81,8 +81,12 @@ normalizeRange({offset, Offset}, Size) when is_integer(Offset), Offset >= 0, Off
    {Offset, Size - Offset};
 normalizeRange({bytes, First, Last}, Size) when is_integer(First), is_integer(Last), First =< Last ->
    normalizeRange({First, Last - First + 1}, Size);
+%% {0,0} 与 [] 一样表示整文件；否则 sendfile(Bytes=0) 会把整文件发出去，
+%% 却配上 Content-Length: 0，keep-alive 上响应会脱同步。与 wsHttp2:fileSpan/2 对齐。
+normalizeRange({0, 0}, _Size) ->
+   undefined;
 normalizeRange({Offset, Length}, Size) when is_integer(Offset), is_integer(Length),
-   Offset >= 0, Length >= 0, Offset < Size ->
+   Offset >= 0, Length > 0, Offset < Size ->
    Length0 = erlang:min(Length, Size - Offset),
    {Offset, Length0};
 normalizeRange([ByteRange], Size) ->
@@ -143,9 +147,9 @@ chunkSize(Opts) ->
          when is_integer(ChunkSize) andalso ChunkSize > 0 ->
          ChunkSize;
       {chunk_size, 0} ->
-         16#1FFF;
+         64 * 1024;
       false ->
-         16#1FFF
+         64 * 1024
    end.
 
 -spec sendfileLoop(inet:socket() | ssl:sslsocket(), file:fd(), non_neg_integer(), non_neg_integer(), pos_integer()) -> {ok, non_neg_integer()} | {error, term()}.
