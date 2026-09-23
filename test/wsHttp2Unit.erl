@@ -1051,6 +1051,57 @@ rejectsInvalidFieldSyntax() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+http2_accepts_identical_duplicate_content_length_test_() ->
+   {timeout, 20, fun acceptsIdenticalDuplicateContentLength/0}.
+
+acceptsIdenticalDuplicateContentLength() ->
+   Name = ws_http2_dup_cl_ok_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"0">>}, {<<"content-length">>, <<"0">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<>>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_rejects_conflicting_content_length_test_() ->
+   {timeout, 20, fun rejectsConflictingContentLength/0}.
+
+rejectsConflictingContentLength() ->
+   Name = ws_http2_dup_cl_bad_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"0">>}, {<<"content-length">>, <<"1">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_rejects_signed_content_length_test_() ->
    {timeout, 20, fun rejectsSignedContentLength/0}.
 
