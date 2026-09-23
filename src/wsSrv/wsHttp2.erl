@@ -1004,7 +1004,7 @@ handleStreamStart(StreamId, WorkerPid, Token, Req, Headers0, Initial0, State0) -
          Headers = normalizeResponseHeaders(Headers0, []),
          H2Headers = [{<<":status">>, <<"200">>} | Headers],
          Tx0 = maps:get(tx_hpack, State),
-         {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
+         {Block, Tx} = wsHpack:encodeLower(H2Headers, Tx0),
          HeadOnly = Method =:= 'HEAD',
          HFrames = wsHttp2Frame:headersFrames(Block, StreamId, maps:get(peer_max_frame, State), HeadOnly),
          case wsNet:send(maps:get(socket, State), HFrames) of
@@ -1307,7 +1307,7 @@ sendHeaderBlock(StreamId, Code, Headers0, DeclaredSize, EndOnHeaders, State0) ->
          {error, headers, State0};
       true ->
          Tx0 = maps:get(tx_hpack, State0),
-         {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
+         {Block, Tx} = wsHpack:encodeLower(H2Headers, Tx0),
          HFrames = wsHttp2Frame:headersFrames(Block, StreamId, maps:get(peer_max_frame, State0), EndOnHeaders),
          case wsNet:send(maps:get(socket, State0), HFrames) of
             {error, Reason} ->
