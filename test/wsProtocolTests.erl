@@ -66,6 +66,24 @@ connection_tokens_are_cached_during_parse_test() ->
    ?assertEqual(false, State#wsState.reqConnClose),
    ?assertEqual(true, State#wsState.reqConnKeepAlive).
 
+options_asterisk_request_target_test() ->
+   Req = <<"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual(<<"*">>, (State#wsState.wsReq)#wsReq.path).
+
+asterisk_requires_options_test() ->
+   Req = <<"GET * HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   ?assertMatch({error, invalid_request_target},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
+
+connect_authority_form_test() ->
+   Req = <<"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(<<"example.com">>, WsReq#wsReq.host),
+   ?assertEqual(443, WsReq#wsReq.port),
+   ?assertEqual(<<"example.com:443">>, WsReq#wsReq.path).
+
 origin_form_explicit_host_port_test() ->
    Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
