@@ -51,6 +51,8 @@
    , headerCnt = 0 :: non_neg_integer()                             %% header计数
    , headerBytes = 0 :: non_neg_integer()                           %% 已解析header总字节数
    , hostHeaderSeen = false :: boolean()                            %% 是否收到Host头
+   , reqConnClose = false :: boolean()                              %% 请求Connection是否包含close
+   , reqConnKeepAlive = false :: boolean()                          %% 请求Connection是否包含keep-alive
    , temHeader = [] :: wsHeaders()                                  %% 解析header临时数据
    , contentLength :: undefined | non_neg_integer() | chunked       %% 长度
    , bodyAcc = [] :: [binary()]                                     %% Body分段，避免反复拼binary
