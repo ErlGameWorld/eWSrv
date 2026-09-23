@@ -374,6 +374,14 @@ handleMsg({tcp, _Socket, Data}, State0) ->
                {stop, Err}
          end
    end;
+handleMsg(h2_flush_pending, #wsState{protocol = http2, h2State = H2} = State) ->
+   case wsHttp2:resumePending(H2) of
+      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+      {error, Code, Reason} ->
+         {stop, {http2_flush, Code, Reason}, State};
+      {stop, Reason, NH2} ->
+         {stop, Reason, State#wsState{h2State = NH2}}
+   end;
 handleMsg(h2_drain_close, #wsState{protocol = http2} = _State) ->
    {stop, normal};
 handleMsg({h2_settings_ack_timeout, Token}, #wsState{protocol = http2, h2State = H2} = State) ->
