@@ -264,7 +264,8 @@ result(Requests, Concurrency, Warmup, TotalUs, Sorted) ->
       latency_avg_ms => avg(Sorted) / 1000,
       latency_p50_ms => percentile(Sorted, 0.50) / 1000,
       latency_p95_ms => percentile(Sorted, 0.95) / 1000,
-      latency_p99_ms => percentile(Sorted, 0.99) / 1000
+      latency_p99_ms => percentile(Sorted, 0.99) / 1000,
+      latency_p999_ms => percentile(Sorted, 0.999) / 1000
    }.
 
 avg([]) ->
@@ -290,7 +291,8 @@ printResult(R) ->
       "latency avg    : ~.3f ms~n"
       "latency p50    : ~.3f ms~n"
       "latency p95    : ~.3f ms~n"
-      "latency p99    : ~.3f ms~n~n",
+      "latency p99    : ~.3f ms~n"
+      "latency p99.9  : ~.3f ms~n~n",
       [
          maps:get(requests, R),
          maps:get(connections, R),
@@ -300,7 +302,8 @@ printResult(R) ->
          maps:get(latency_avg_ms, R),
          maps:get(latency_p50_ms, R),
          maps:get(latency_p95_ms, R),
-         maps:get(latency_p99_ms, R)
+         maps:get(latency_p99_ms, R),
+         maps:get(latency_p999_ms, R)
       ]).
 
 positive(N, _Name) when is_integer(N), N > 0 ->
