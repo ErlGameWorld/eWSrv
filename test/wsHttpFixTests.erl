@@ -185,6 +185,7 @@ malformedResponseHeaders() ->
       {ok, Bin} = recvAll(Sock, <<>>, 3000),
       ?assertNotEqual(nomatch, binary:match(Bin, <<"X-Good: ok">>)),
       ?assertEqual(nomatch, binary:match(Bin, <<"X-Injected">>)),
+      ?assertEqual(nomatch, binary:match(Bin, <<"X-Ctl">>)),
       {200, _Headers, <<"safe">>, <<>>} = takeResponse(Bin),
       gen_tcp:close(Sock)
    end).
