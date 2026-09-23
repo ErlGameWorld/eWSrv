@@ -886,6 +886,7 @@ dispatchRequest(StreamId, State0) ->
          Req0 = maps:get(req, StreamA),
          Body = case maps:get(body_acc, StreamA) of
             [] -> <<>>;
+            [One] -> One;
             Acc -> iolist_to_binary(lists:reverse(Acc))
          end,
          Req = Req0#wsReq{body = Body},
