@@ -761,6 +761,24 @@ hpack_dynamic_table_reuse_test() ->
    {ok, H, _D2} = wsHpack:decode(iolist_to_binary(Enc2), D1),
    ?assert(iolist_size(Enc2) < iolist_size(Enc1)).
 
+hpack_dynamic_table_eviction_roundtrip_test() ->
+   %% Tiny table forces eviction on almost every new literal. The test checks
+   %% encoder/decoder context stays synchronized across repeated evictions.
+   E0 = wsHpack:setMax(128, wsHpack:new()),
+   D0 = wsHpack:new(128),
+   H1 = [{<<"x-a">>, binary:copy(<<"a">>, 48)}],
+   H2 = [{<<"x-b">>, binary:copy(<<"b">>, 48)}],
+   H3 = [{<<"x-c">>, binary:copy(<<"c">>, 48)}],
+   {B1, E1} = wsHpack:encode(H1, E0),
+   {ok, H1, D1} = wsHpack:decode(iolist_to_binary(B1), D0),
+   {B2, E2} = wsHpack:encode(H2, E1),
+   {ok, H2, D2} = wsHpack:decode(iolist_to_binary(B2), D1),
+   {B3, E3} = wsHpack:encode(H3, E2),
+   {ok, H3, D3} = wsHpack:decode(iolist_to_binary(B3), D2),
+   {B4, _E4} = wsHpack:encode(H2, E3),
+   {ok, H2, _D4} = wsHpack:decode(iolist_to_binary(B4), D3).
+
+
 hpack_bad_index_regression_test() ->
    ?assertEqual({error, badIndex}, wsHpack:decode(<<16#80>>, wsHpack:new())),
    ?assertEqual({error, {badIndex, 137}}, wsHpack:decode(<<16#FF, 16#0A>>, wsHpack:new())).
