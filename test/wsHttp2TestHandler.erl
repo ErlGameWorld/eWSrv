@@ -26,6 +26,8 @@ handle('GET', <<"/informational-final">>, _Req) ->
    {103, [{<<"link">>, <<"</style.css>; rel=preload">>}], <<"must-not-be-final">>};
 handle('GET', <<"/reset-content">>, _Req) ->
    {205, [{<<"content-type">>, <<"text/plain">>}], <<"must-not-be-sent">>};
+handle('GET', <<"/stream-oversized-header">>, _Req) ->
+   {chunk, [{<<"x-large">>, binary:copy(<<"x">>, 70 * 1024)}], <<>>};
 handle('POST', <<"/echo">>, #wsReq{body = Body}) ->
    {ok, [{<<"content-type">>, <<"application/octet-stream">>}], Body};
 handle(_, _, _) ->
