@@ -615,16 +615,66 @@ sendFlowControl() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+http2_receive_window_tuning_advertises_stream_and_connection_windows_test_() ->
+   {timeout, 20, fun receiveWindowTuning/0}.
+
+receiveWindowTuning() ->
+   Name = ws_http2_receive_window_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   ReceiveWindow = 1024 * 1024,
+   MaxConcurrent = 37,
+   try
+      {Sock, Parser1, ServerFrames} = openPriorKnowledgeOpts(Name, wsHttp2TestHandler, [
+         {http2ReceiveWindow, ReceiveWindow},
+         {http2MaxConcurrentStreams, MaxConcurrent}
+      ]),
+      SettingsPayload = hd([
+         Payload || {frame, settings, Flags, 0, Payload} <- ServerFrames,
+                    Flags band 1 =:= 0
+      ]),
+      {ok, Settings} = wsHttp2Frame:settingsDecode(SettingsPayload),
+      ?assertEqual(ReceiveWindow, proplists:get_value(initial_window_size, Settings)),
+      ?assertEqual(MaxConcurrent, proplists:get_value(max_concurrent_streams, Settings)),
+      Delta = ReceiveWindow - 65535,
+      ?assert(lists:any(fun
+         ({frame, window_update, _Flags, 0, Payload}) ->
+            wsHttp2Frame:windowUpdateIncrement(Payload) =:= {ok, Delta};
+         (_) -> false
+      end, ServerFrames)),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+      _ = Parser1,
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 openPriorKnowledge(Name, Handler) ->
+   {Sock, Parser, _ServerFrames} = openPriorKnowledgeOpts(Name, Handler, []),
+   ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+   {Sock, Parser}.
+
+openPriorKnowledgeOpts(Name, Handler, ExtraOpts) ->
    {ok, _} = application:ensure_all_started(eWSrv),
-   {ok, _} = eWSrv:openSrv(Name, 0, [{http2, true}, {wsMod, Handler}]),
+   {ok, _} = eWSrv:openSrv(Name, 0, [
+      {http2, true}, {wsMod, Handler} | ExtraOpts
+   ]),
    ListenerName = ntCom:lsName(tcp, Name),
    Port = ntTcpListener:getListenPort(ListenerName),
-   {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port, [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
+   {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port,
+      [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
    ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
-   {Parser1, _ServerFrames} = recvUntil(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
-   ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
-   {Sock, Parser1}.
+   NeedInitial = fun(Frames) ->
+      hasSettings(Frames) andalso
+         case proplists:get_value(http2ReceiveWindow, ExtraOpts, 65535) of
+            65535 -> true;
+            _ -> lists:any(fun
+               ({frame, window_update, _Flags, 0, _Payload}) -> true;
+               (_) -> false
+            end, Frames)
+         end
+   end,
+   {Parser1, ServerFrames} = recvUntil(NeedInitial, Sock, wsHttp2Frame:new(), [], 5000),
+   {Sock, Parser1, ServerFrames}.
 
 streamEnded(StreamId, Frames) ->
    lists:any(fun
