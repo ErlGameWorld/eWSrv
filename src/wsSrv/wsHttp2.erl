@@ -1018,33 +1018,41 @@ handleStreamStart(StreamId, WorkerPid, Token, Req, Headers0, Initial0, State0) -
          Method = Req#wsReq.method,
          Headers = normalizeResponseHeaders(Headers0, []),
          H2Headers = [{<<":status">>, <<"200">>} | Headers],
-         Tx0 = maps:get(tx_hpack, State),
-         {Block, Tx} = wsHpack:encodeLower(H2Headers, Tx0),
-         HeadOnly = Method =:= 'HEAD',
-         HFrames = wsHttp2Frame:headersFrames(Block, StreamId, maps:get(peer_max_frame, State), HeadOnly),
-         case wsNet:send(maps:get(socket, State), HFrames) of
-            {error, Reason} ->
-               WorkerPid ! {h2_chunk_ack, Token, {error, Reason}},
-               {stop, {socket_error, Reason}, State};
-            ok when HeadOnly ->
-               WorkerPid ! {h2_chunk_ack, Token, closed},
-               {ok, dropStream(StreamId, State#{tx_hpack => Tx})};
-            ok ->
-               Initial = iolist_to_binary(Initial0),
-               Stream1 = Stream0#{
-                  response_started => true,
-                  streaming => true,
-                  pending_send => <<>>,
-                  pending_end_stream => false,
-                  pending_ack => undefined
-               },
-               State1 = State#{tx_hpack => Tx, streams => (maps:get(streams, State))#{StreamId := Stream1}},
-               case Initial of
-                  <<>> ->
-                     WorkerPid ! {h2_chunk_ack, Token, ok},
-                     {ok, State1};
-                  _ ->
-                     queueStreamChunk(StreamId, WorkerPid, Token, Initial, false, State1)
+         case responseHeadersAllowed(headerListSize(H2Headers), State) of
+            false ->
+               %% streaming response 也必须遵守与普通响应相同的 header-list
+               %% 上限；并且应在 HPACK 编码前拒绝，避免为注定丢弃的超大头做压缩。
+               WorkerPid ! {h2_chunk_ack, Token, {error, headers}},
+               {ok, streamError(StreamId, internal_error, State)};
+            true ->
+               Tx0 = maps:get(tx_hpack, State),
+               {Block, Tx} = wsHpack:encodeLower(H2Headers, Tx0),
+               HeadOnly = Method =:= 'HEAD',
+               HFrames = wsHttp2Frame:headersFrames(Block, StreamId, maps:get(peer_max_frame, State), HeadOnly),
+               case wsNet:send(maps:get(socket, State), HFrames) of
+                  {error, Reason} ->
+                     WorkerPid ! {h2_chunk_ack, Token, {error, Reason}},
+                     {stop, {socket_error, Reason}, State};
+                  ok when HeadOnly ->
+                     WorkerPid ! {h2_chunk_ack, Token, closed},
+                     {ok, dropStream(StreamId, State#{tx_hpack => Tx})};
+                  ok ->
+                     Initial = iolist_to_binary(Initial0),
+                     Stream1 = Stream0#{
+                        response_started => true,
+                        streaming => true,
+                        pending_send => <<>>,
+                        pending_end_stream => false,
+                        pending_ack => undefined
+                     },
+                     State1 = State#{tx_hpack => Tx, streams => (maps:get(streams, State))#{StreamId := Stream1}},
+                     case Initial of
+                        <<>> ->
+                           WorkerPid ! {h2_chunk_ack, Token, ok},
+                           {ok, State1};
+                        _ ->
+                           queueStreamChunk(StreamId, WorkerPid, Token, Initial, false, State1)
+                     end
                end
          end
    end.
