@@ -298,9 +298,8 @@ handleMsg({tcp, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State
 handleMsg({tcp, _Socket, Data}, #wsState{protocol = detect, http2Enabled = true} = State) ->
    detectCleartextProtocol(Data, State);
 handleMsg({tcp, _Socket, Data}, State0) ->
-   State = ensureRequestStarted(State0),
-   #wsState{stage = Stage, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, Data, Socket, State) of
+   #wsState{stage = Stage, socket = Socket} = State0,
+   case wsHttpProtocol:request(Stage, Data, Socket, State0) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
          #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
@@ -330,8 +329,10 @@ handleMsg({tcp, _Socket, Data}, State0) ->
             {stop, Reason, StopState} ->
                {stop, Reason, StopState}
          end;
-      {ok, _NewState} = LRet ->
-         LRet;
+      {ok, NewState} ->
+         %% 完整单包请求无需读取 monotonic clock；只有需要等待后续数据时
+         %% 才启动 requestTimeout 计时，避免给 /hello 这类热路径增加固定成本。
+         {ok, markRequestStarted(State0, NewState)};
       {close, _NewState} ->
          {stop, normal};
       {close, Reason, NewState} ->
@@ -399,9 +400,8 @@ handleMsg({tcp_passive, Socket}, _State) ->
 handleMsg({ssl, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
    handleHttp2Data(Data, H2, State);
 handleMsg({ssl, _Socket, Data}, State0) ->
-   State = ensureRequestStarted(State0),
-   #wsState{stage = Stage, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, Data, Socket, State) of
+   #wsState{stage = Stage, socket = Socket} = State0,
+   case wsHttpProtocol:request(Stage, Data, Socket, State0) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
          #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
@@ -430,8 +430,10 @@ handleMsg({ssl, _Socket, Data}, State0) ->
             {stop, Reason, StopState} ->
                {stop, Reason, StopState}
          end;
-      {ok, _NewState} = LRet ->
-         LRet;
+      {ok, NewState} ->
+         %% 完整单包请求无需读取 monotonic clock；只有需要等待后续数据时
+         %% 才启动 requestTimeout 计时，避免给 /hello 这类热路径增加固定成本。
+         {ok, markRequestStarted(State0, NewState)};
       {close, _NewState} ->
          {stop, normal};
       {close, Reason, NewState} ->
@@ -576,11 +578,11 @@ shutdown_reason(shutdown) -> shutdown;
 shutdown_reason({shutdown, _} = Reason) -> Reason;
 shutdown_reason(Reason) -> {shutdown, Reason}.
 
-ensureRequestStarted(#wsState{stage = wsWs} = State) ->
+markRequestStarted(#wsState{stage = wsWs}, State) ->
    State;
-ensureRequestStarted(#wsState{requestStartedAt = undefined} = State) ->
+markRequestStarted(#wsState{requestStartedAt = undefined}, State) ->
    State#wsState{requestStartedAt = erlang:monotonic_time(millisecond)};
-ensureRequestStarted(State) ->
+markRequestStarted(_OldState, State) ->
    State.
 
 newWsState(WsState) ->
@@ -1079,8 +1081,20 @@ validH1HeaderValue(Value) ->
    wsUtil:noCtlChars(Value).
 
 %% 响应头键统一成 binary，便于后续 keydelete / keyfind。
+%% 绝大多数 handler 已直接返回 binary key；这种常见情况原样复用列表，
+%% 避免每个响应都重新分配一份 header list。
 normalizeH1Headers(Headers) ->
-   [{toBinStr(Key), Value} || {Key, Value} <- Headers].
+   case binaryHeaderNames(Headers) of
+      true -> Headers;
+      false -> [{toBinStr(Key), Value} || {Key, Value} <- Headers]
+   end.
+
+binaryHeaderNames([]) ->
+   true;
+binaryHeaderNames([{Key, _Value} | Rest]) when is_binary(Key) ->
+   binaryHeaderNames(Rest);
+binaryHeaderNames(_) ->
+   false.
 
 %% header 名按 RFC 7230 大小写不敏感。旧实现每次 toLowerStr 分配临时 binary，
 %% 响应热路径上每请求十余次查找，吃掉约 15~20% 吞吐。
@@ -1125,11 +1139,11 @@ closeOrKeepAlive(UserHeaders, ReqHeader) ->
 %% HTTP/1.1 下 keep-alive 是默认，不必再解析 Connection: keep-alive。
 connectionPolicy(UserHeaders, ReqHeaders, Version) ->
    case headerHasToken(<<"Connection">>, UserHeaders, <<"close">>)
-        orelse headerHasToken('Connection', ReqHeaders, <<"close">>) of
+        orelse requestHeaderHasToken('Connection', ReqHeaders, <<"close">>) of
       true ->
          close;
       false when Version =:= {1, 0} ->
-         case headerHasToken('Connection', ReqHeaders, <<"keep-alive">>) of
+         case requestHeaderHasToken('Connection', ReqHeaders, <<"keep-alive">>) of
             true -> keep_alive;
             false -> close
          end;
@@ -1145,14 +1159,24 @@ addConnectionHeader(Headers0, Policy, Version) ->
       {keep_alive, _} -> Headers
    end.
 
+%% decode_packet(httph_bin, ...) 会把 Connection 这类标准字段规范成 atom。
+%% 请求热路径因此直接 keyfind，不再在缺失时做逐项大小写扫描。
+requestHeaderHasToken(Name, Headers, Wanted) ->
+   case lists:keyfind(Name, 1, Headers) of
+      false -> false;
+      {_, Value} -> headerValueHasToken(Value, Wanted)
+   end.
+
 headerHasToken(Name, Headers, Wanted) ->
    case findHeader(Name, Headers) of
       false -> false;
-      {_, Value} ->
-         %% 不整串 toLowerStr：按逗号切开后对每个 token 做零分配 CI 比较。
-         Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
-         lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), Wanted) end, Tokens)
+      {_, Value} -> headerValueHasToken(Value, Wanted)
    end.
+
+headerValueHasToken(Value, Wanted) ->
+   %% 不整串 toLowerStr：按逗号切开后对每个 token 做零分配 CI 比较。
+   Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
+   lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), Wanted) end, Tokens).
 
 %% HTTP STATUS CODES
 status(100) -> <<"100 Continue">>;
