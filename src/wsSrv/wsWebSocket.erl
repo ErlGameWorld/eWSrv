@@ -8,6 +8,7 @@
    , parseWebSocketFrames/3
    , processFrames/2
    , handleUpgrade/2
+   , handleUpgrade/3
    , genAcceptKey/1
    , tryWsUpgrade/1
    , sendFrame/3
@@ -383,9 +384,55 @@ encodeFrame(Opcode, Payload0) ->
 
 -spec handleUpgrade(WsMod :: module(), BaseHeaders :: list()) -> {wsWebSocket, list()}.
 handleUpgrade(_WsMod, BaseHeaders) ->
-   %% Subprotocol/extension必须从客户端offer中协商后才能返回。
-   %% 当前公共API没有把offer传到这里，因此宁可不声明，也不能无条件声明服务端列表。
+   %% 兼容旧调用方；没有请求offer时不能凭空声明subprotocol/extension。
    {wsWebSocket, BaseHeaders}.
+
+-spec handleUpgrade(module(), #wsReq{}, list()) -> {wsWebSocket, list()}.
+handleUpgrade(WsMod, #wsReq{headers = ReqHeaders}, BaseHeaders0) ->
+   BaseHeaders = deleteWsHeader(<<"Sec-WebSocket-Protocol">>, BaseHeaders0),
+   case negotiatedSubprotocol(WsMod, ReqHeaders) of
+      undefined ->
+         {wsWebSocket, BaseHeaders};
+      Protocol ->
+         {wsWebSocket, [{<<"Sec-WebSocket-Protocol">>, Protocol} | BaseHeaders]}
+   end.
+
+negotiatedSubprotocol(WsMod, ReqHeaders) ->
+   case erlang:function_exported(WsMod, supportedProtocols, 0) of
+      false ->
+         undefined;
+      true ->
+         Supported0 = WsMod:supportedProtocols(),
+         Supported = [iolist_to_binary(P) || P <- Supported0],
+         case wsHeaderValue(<<"Sec-WebSocket-Protocol">>, ReqHeaders, undefined) of
+            undefined -> undefined;
+            Offered0 ->
+               Offered = [
+                  P || Token <- binary:split(iolist_to_binary(Offered0), <<",">>, [global]),
+                       P <- [string:trim(Token)],
+                       P =/= <<>>
+               ],
+               selectSubprotocol(Offered, Supported)
+         end
+   end.
+
+selectSubprotocol([], _Supported) ->
+   undefined;
+selectSubprotocol([Protocol | Rest], Supported) ->
+   case lists:member(Protocol, Supported) of
+      true -> Protocol;
+      false -> selectSubprotocol(Rest, Supported)
+   end.
+
+deleteWsHeader(_Name, []) ->
+   [];
+deleteWsHeader(Name, [{Key, Value} = Header | Rest]) ->
+   case wsUtil:headerNameEq(Key, Name) of
+      true -> deleteWsHeader(Name, Rest);
+      false -> [Header | deleteWsHeader(Name, Rest)]
+   end;
+deleteWsHeader(Name, [_ | Rest]) ->
+   deleteWsHeader(Name, Rest).
 
 -spec genAcceptKey(binary()) -> binary().
 genAcceptKey(Key) ->
