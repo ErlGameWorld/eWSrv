@@ -47,11 +47,16 @@ openSrv(Port, WsOpts) ->
    MaxWsMessageSize = ?wsGLV(maxWsMessageSize, WsOpts, ?DefMaxWsMessageSize),
    ChunkedSupp = ?wsGLV(chunkedSupp, WsOpts, false),
    Http2 = ?wsGLV(http2, WsOpts, true),
+   Http2MaxConcurrent = h2PositiveOpt(http2MaxConcurrentStreams,
+      ?wsGLV(http2MaxConcurrentStreams, WsOpts, ?DefHttp2MaxConcurrentStreams)),
+   Http2ReceiveWindow = h2ReceiveWindowOpt(
+      ?wsGLV(http2ReceiveWindow, WsOpts, ?DefHttp2ReceiveWindow)),
    RequestTimeout = ?wsGLV(requestTimeout, WsOpts, ?DefRequestTimeout),
    KeepAliveTimeout = ?wsGLV(keepAliveTimeout, WsOpts, ?DefKeepAliveTimeout),
    WsSupName = ?wsGLV(wsSupName, WsOpts, undefined),
    ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize,
-      MaxWsFrameSize, MaxWsMessageSize, Http2, RequestTimeout, KeepAliveTimeout},
+      MaxWsFrameSize, MaxWsMessageSize, Http2, RequestTimeout, KeepAliveTimeout,
+      Http2MaxConcurrent, Http2ReceiveWindow},
    T2WsOpts = lists:keystore(conArgs, 1, T1WsOpts, {conArgs, ConArgs}),
    TcpOpts = ?wsGLV(tcpOpts, T2WsOpts, []),
    NewTcpOpts = wsUtil:mergeOpts(?DefWsOpts, TcpOpts),
@@ -77,11 +82,16 @@ openSrv(WSrvName, Port, WsOpts) ->
    MaxWsMessageSize = ?wsGLV(maxWsMessageSize, WsOpts, ?DefMaxWsMessageSize),
    ChunkedSupp = ?wsGLV(chunkedSupp, WsOpts, false),
    Http2 = ?wsGLV(http2, WsOpts, true),
+   Http2MaxConcurrent = h2PositiveOpt(http2MaxConcurrentStreams,
+      ?wsGLV(http2MaxConcurrentStreams, WsOpts, ?DefHttp2MaxConcurrentStreams)),
+   Http2ReceiveWindow = h2ReceiveWindowOpt(
+      ?wsGLV(http2ReceiveWindow, WsOpts, ?DefHttp2ReceiveWindow)),
    RequestTimeout = ?wsGLV(requestTimeout, WsOpts, ?DefRequestTimeout),
    KeepAliveTimeout = ?wsGLV(keepAliveTimeout, WsOpts, ?DefKeepAliveTimeout),
    WsSupName = ?wsGLV(wsSupName, WsOpts, undefined),
    ConArgs = {WsSupName, WsMod, MaxSize, ChunkedSupp, MaxRequestLineSize, MaxHeaderSize,
-      MaxWsFrameSize, MaxWsMessageSize, Http2, RequestTimeout, KeepAliveTimeout},
+      MaxWsFrameSize, MaxWsMessageSize, Http2, RequestTimeout, KeepAliveTimeout,
+      Http2MaxConcurrent, Http2ReceiveWindow},
    T2WsOpts = lists:keystore(conArgs, 1, T1WsOpts, {conArgs, ConArgs}),
    TcpOpts = ?wsGLV(tcpOpts, T2WsOpts, []),
    NewTcpOpts = wsUtil:mergeOpts(?DefWsOpts, TcpOpts),
@@ -115,6 +125,16 @@ enforceHttp2Tls(SslOpts) ->
          Safe = case Allowed of [] -> ['tlsv1.2', 'tlsv1.3']; _ -> Allowed end,
          lists:keystore(versions, 1, SslOpts, {versions, Safe})
    end.
+
+h2PositiveOpt(_Name, Value) when is_integer(Value), Value > 0, Value =< 16#7fffffff ->
+   Value;
+h2PositiveOpt(Name, Value) ->
+   erlang:error({bad_option, Name, Value}).
+
+h2ReceiveWindowOpt(Value) when is_integer(Value), Value >= 65535, Value =< 16#7fffffff ->
+   Value;
+h2ReceiveWindowOpt(Value) ->
+   erlang:error({bad_option, http2ReceiveWindow, Value}).
 
 closeSrv(WSrvNameOrPort) ->
    WSrvName = ?CASE(is_integer(WSrvNameOrPort), wSrvName(WSrvNameOrPort), WSrvNameOrPort),
