@@ -129,6 +129,8 @@ parseOneHeader(Key, Value, Rest, Socket, #wsState{headerCnt = HeaderCnt, temHead
                parseTransferEncoding(Value, Rest, Socket, NState);
             'Host' ->
                parseHost(Value, Rest, Socket, NState);
+            'Connection' ->
+               parseConnection(Value, Rest, Socket, NState);
             _ ->
                parseHeaders(Rest, Socket, NState)
          end
@@ -185,6 +187,32 @@ parseHost(Value, Rest, Socket, #wsState{wsReq = WsReq} = State) ->
       error ->
          {error, invalid_host}
    end.
+
+parseConnection(Value, Rest, Socket, State) ->
+   %% 常见值走无分配快路径；复杂 token 列表只解析一次。
+   case Value of
+      <<"close">> ->
+         parseHeaders(Rest, Socket, State#wsState{reqConnClose = true});
+      <<"keep-alive">> ->
+         parseHeaders(Rest, Socket, State#wsState{reqConnKeepAlive = true});
+      _ ->
+         {HasClose, HasKeepAlive} = connectionTokens(Value),
+         parseHeaders(Rest, Socket, State#wsState{
+            reqConnClose = State#wsState.reqConnClose orelse HasClose,
+            reqConnKeepAlive = State#wsState.reqConnKeepAlive orelse HasKeepAlive
+         })
+   end.
+
+connectionTokens(Value) ->
+   connectionTokens(binary:split(iolist_to_binary(Value), <<",">>, [global]), false, false).
+
+connectionTokens([], HasClose, HasKeepAlive) ->
+   {HasClose, HasKeepAlive};
+connectionTokens([Token0 | Rest], HasClose, HasKeepAlive) ->
+   Token = string:trim(Token0),
+   IsClose = wsUtil:headerNameEq(Token, <<"close">>),
+   IsKeepAlive = wsUtil:headerNameEq(Token, <<"keep-alive">>),
+   connectionTokens(Rest, HasClose orelse IsClose, HasKeepAlive orelse IsKeepAlive).
 
 finishHeaders(Rest, Socket,
    #wsState{temHeader = TemHeader0, contentLength = CLen, wsReq = WsReq0, hostHeaderSeen = HostSeen} = State) ->
