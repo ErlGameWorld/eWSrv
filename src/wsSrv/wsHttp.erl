@@ -229,6 +229,20 @@ innerError(_CurState, Error, Class, Reason, Strace) ->
 init(Args) ->
    case Args of
       {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow} ->
+         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+            Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, false, undefined)};
+      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+         Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow}} ->
+         case maybeInitHandler(WsMod, Args) of
+            {ok, WebState} ->
+               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+                  Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, true, WebState)};
+            {stop, Reason} ->
+               {stop, Reason}
+         end;
+      %% 兼容上一版11元组连接参数。
+      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
          Http2, RequestTimeout, KeepAliveTimeout} ->
          {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
             Http2, RequestTimeout, KeepAliveTimeout, false, undefined)};
@@ -270,6 +284,12 @@ init(Args) ->
 
 newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
    Http2, RequestTimeout, KeepAliveTimeout, IsBehavior, WebState) ->
+   newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+      Http2, RequestTimeout, KeepAliveTimeout, ?DefHttp2MaxConcurrentStreams, ?DefHttp2ReceiveWindow,
+      IsBehavior, WebState).
+
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
+   Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, IsBehavior, WebState) ->
    Protocol = case Http2 of true -> detect; false -> http1 end,
    #wsState{
       wsMod = WsMod,
@@ -280,6 +300,8 @@ newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, Max
       maxWsFrameSize = MaxWsFrame,
       maxWsMessageSize = MaxWsMessage,
       http2Enabled = Http2,
+      http2MaxConcurrentStreams = H2MaxConcurrent,
+      http2ReceiveWindow = H2ReceiveWindow,
       protocol = Protocol,
       requestTimeout = RequestTimeout,
       keepAliveTimeout = KeepAliveTimeout,
@@ -524,7 +546,8 @@ sslProtocolState(_SslSock, State) ->
    {ok, State#wsState{protocol = http1}}.
 
 startHttp2(#wsState{socket = Socket, wsMod = WsMod, maxSize = MaxBody, maxHeaderSize = MaxHeader} = State, Scheme) ->
-   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout),
+   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout,
+      State#wsState.http2MaxConcurrentStreams, State#wsState.http2ReceiveWindow),
    case wsHttp2:start(H20) of
       {ok, H2} ->
          NState = State#wsState{protocol = http2, h2State = H2, requestStartedAt = undefined, buffer = <<>>},
