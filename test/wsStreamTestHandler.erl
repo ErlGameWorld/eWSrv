@@ -21,6 +21,12 @@ handle('GET', <<"/finite">>, _Req) ->
       Conn ! {chunk, close}
    end),
    {chunk, [{<<"Content-Type">>, <<"text/plain">>}]};
+handle('GET', <<"/producer-crash">>, _Req) ->
+   spawn_link(fun() ->
+      timer:sleep(50),
+      exit(stream_producer_failed)
+   end),
+   {chunk, [{<<"Content-Type">>, <<"text/plain">>}]};
 handle('GET', <<"/delayed-finite">>, _Req) ->
    Conn = self(),
    spawn(fun() ->
