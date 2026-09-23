@@ -661,20 +661,21 @@ doHandle(State) ->
          {response, 500, [], <<"Internal server error">>}
    end.
 
-%% Inject compression for normal responses
-doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version) ->
-   Norm0 = normalizeH1Headers(UserHeaders0),
-   {SBody, UserHeaders1} = tryCompressResponse(Body, Norm0, ReqHeaders, Code, Method),
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, UserHeaders1)),
-   NHeaders = normalizeContentLength(Code, Method, iolist_size(SBody), UserHeaders),
-   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
-   Headers = addConnectionHeader(NHeaders, Policy, Version),
-   case sendResponse(Socket, Method, Code, Headers, SBody) of
+%% Inject compression for normal responses.
+%% 用户响应头只扫描一次，完成规范化、安全校验、框架自管头剔除和Connection语义提取。
+doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version, ReqConn) ->
+   {UserHeaders0a, UserClose} = prepareResponseHeaders(UserHeaders0),
+   BodySize0 = iolist_size(Body),
+   {SBody, UserHeaders1, BodySize} =
+      tryCompressResponseSized(Body, BodySize0, UserHeaders0a, ReqHeaders, Code, Method),
+   NHeaders = normalizeContentLength(Code, Method, BodySize, UserHeaders1),
+   Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+   Headers = addConnectionHeaderPrepared(NHeaders, Policy, Version),
+   case sendPreparedResponse(Socket, Method, Code, Headers, SBody) of
       ok -> Policy;
       _ -> close
    end;
-doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) ->
+doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version, _ReqConn) ->
    %% chunk framing由框架生成，因此Content-Length和业务层自带的
    %% Transfer-Encoding都必须移除，避免线路格式与响应头声明不一致。
    UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
@@ -707,12 +708,12 @@ doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) 
          close
    end;
 %% WebSocket升级响应
-doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version) ->
+doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version, _ReqConn) ->
    case sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>) of
       ok -> keep_ws;
       _ -> close
    end;
-doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version) ->
+doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version, _ReqConn) ->
    Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
    %% 文件响应由框架确定长度/Range，不能保留业务层自带TE或CL。
    UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
