@@ -319,12 +319,21 @@ parseChunkedState(Data, #wsState{chunkState = trailers, maxHeaderSize = MaxHeade
       _ ->
          case binary:match(Data, <<"\r\n\r\n">>) of
             {Pos, 4} when Pos =< MaxHeaderSize ->
-               <<_Trailers:Pos/binary, "\r\n\r\n", Rest/binary>> = Data,
-               Body = finishBody(Acc),
-               {wsDone, State#wsState{
-                  buffer = Rest, bodyAcc = [], chunkState = size,
-                  wsReq = WsReq#wsReq{body = Body}
-               }};
+               <<Trailers:Pos/binary, "\r\n\r\n", Rest/binary>> = Data,
+               case parseChunkTrailers(<<Trailers/binary, "\r\n\r\n">>, 0, []) of
+                  {ok, TrailerHeaders} ->
+                     Body = finishBody(Acc),
+                     ReqHeaders = WsReq#wsReq.headers,
+                     {wsDone, State#wsState{
+                        buffer = Rest, bodyAcc = [], chunkState = size,
+                        wsReq = WsReq#wsReq{
+                           body = Body,
+                           headers = ReqHeaders ++ TrailerHeaders
+                        }
+                     }};
+                  {error, _} = Error ->
+                     Error
+               end;
             {Pos, 4} when Pos > MaxHeaderSize ->
                {err_code, 431};
             nomatch when byte_size(Data) > MaxHeaderSize ->
@@ -333,6 +342,39 @@ parseChunkedState(Data, #wsState{chunkState = trailers, maxHeaderSize = MaxHeade
                {ok, State#wsState{buffer = Data}}
          end
    end.
+
+parseChunkTrailers(_Data, Count, _Acc) when Count > 100 ->
+   {error, too_many_trailers};
+parseChunkTrailers(Data, Count, Acc) ->
+   case erlang:decode_packet(httph_bin, Data, []) of
+      {ok, {http_header, _, Key, _, Value}, Rest} ->
+         case forbiddenTrailer(Key) of
+            true -> {error, forbidden_trailer};
+            false -> parseChunkTrailers(Rest, Count + 1, [{Key, Value} | Acc])
+         end;
+      {ok, http_eoh, <<>>} ->
+         {ok, lists:reverse(Acc)};
+      {ok, http_eoh, _Rest} ->
+         {error, malformed_trailers};
+      {ok, {http_error, Reason}, _} ->
+         {error, {invalid_trailer, Reason}};
+      {more, _} ->
+         {error, incomplete_trailers};
+      {error, Reason} ->
+         {error, {invalid_trailer, Reason}}
+   end.
+
+forbiddenTrailer('Content-Length') -> true;
+forbiddenTrailer('Transfer-Encoding') -> true;
+forbiddenTrailer('Host') -> true;
+forbiddenTrailer('Connection') -> true;
+forbiddenTrailer('Upgrade') -> true;
+forbiddenTrailer('Keep-Alive') -> true;
+forbiddenTrailer('Proxy-Connection') -> true;
+forbiddenTrailer(Key) when is_binary(Key) ->
+   wsUtil:headerNameEq(Key, <<"Trailer">>) orelse
+   wsUtil:headerNameEq(Key, <<"TE">>);
+forbiddenTrailer(_) -> false.
 
 finishBody([]) ->
    <<>>;
