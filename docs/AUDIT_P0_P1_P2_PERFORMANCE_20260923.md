@@ -75,6 +75,16 @@
 6. **WebSocket handshake header 名匹配不够稳健**
    - `Sec-WebSocket-*` 等字段改为真正大小写不敏感匹配。
 
+7. **HTTP/2 streaming response 绕过响应 header-list 限制**
+   - 普通 response 会检查本地 `maxHeaderSize` 与 peer `SETTINGS_MAX_HEADER_LIST_SIZE`。
+   - 原 streaming/chunk response 在 `handleStreamStart` 直接进入 HPACK 编码和发送，形成限制绕过。
+   - 现在与普通响应使用同一限制，并在 HPACK 编码前拒绝超大 header，避免额外 CPU/内存开销。
+
+8. **HTTP/2 调优参数链一度不完整**
+   - `eWSrv/wsHttp` 已传入 `http2MaxConcurrentStreams/http2ReceiveWindow`，但 `wsHttp2` 缺少对应 `new/8`。
+   - 已补齐完整参数链与旧 `new/6` 兼容入口。
+   - `http2ReceiveWindow > 65535` 现在同时通过 SETTINGS 调整 stream window，并通过 stream-id 0 的 WINDOW_UPDATE 调整 connection receive window；避免“stream 窗口变大但连接仍卡 64KB”的假优化。
+
 ### P2：已补或仍明确存在
 
 已补：
@@ -142,6 +152,12 @@
 - response normalization 同一遍剔除框架自管 content-length。
 - authority parser 避免全局 split 临时列表。
 - 单 frame request body 不再复制。
+- H2 request 普通 header 的 field-value 不再在同一解析路径重复扫描两遍。
+- 无 query 的 `:path` 使用 `binary:match/2` 快路径，避免 `binary:split/2` 临时列表。
+- 单帧 HPACK response block 保持 iodata 直接发送；只有真正需要 CONTINUATION 时才扁平化。
+- 单帧 HEADERS 已知 HPACK block 长度后直接构造 frame header，不再二次 `iolist_size/1`。
+- `http2MaxConcurrentStreams` 同时用于 SETTINGS 广播和本地 stream admission enforcement。
+- `http2ReceiveWindow` 同时覆盖 stream/connection 两级接收窗口。
 
 ### 3.5 HPACK / Huffman
 
@@ -238,7 +254,10 @@ rebar3 eunit
 - WebSocket header casing
 - WebSocket subprotocol
 - H2 nested iodata frame
+- H2 single-frame HPACK iodata path
 - H2 normalized HPACK fast path
+- H2 streaming response header-list limit
+- H2 configurable stream/connection receive window + max concurrent SETTINGS
 - stream 期间到达 pipeline request
 - 原有 H2 flow-control / reset / timeout / streaming 回归
 
