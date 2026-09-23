@@ -3,6 +3,12 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("wsCom.hrl").
 
+header_value_control_character_test() ->
+   ?assert(wsUtil:noCtlChars(<<"ok\tvalue">>)),
+   ?assertNot(wsUtil:noCtlChars(<<1>>)),
+   ?assertNot(wsUtil:noCtlChars(<<127>>)),
+   ?assertNot(wsUtil:noCtlChars(<<"bad\rvalue">>)).
+
 conflicting_content_length_test() ->
    Req = <<"POST / HTTP/1.1\r\n", "Host: localhost\r\n", "Content-Length: 4\r\n", "Content-Length: 5\r\n", "\r\n" >>,
    ?assertMatch({error, conflicting_content_length}, wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
