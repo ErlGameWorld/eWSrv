@@ -80,9 +80,15 @@ connect_authority_form_test() ->
    Req = <<"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n">>,
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
    WsReq = State#wsState.wsReq,
+   ?assertEqual('CONNECT', WsReq#wsReq.method),
    ?assertEqual(<<"example.com">>, WsReq#wsReq.host),
    ?assertEqual(443, WsReq#wsReq.port),
    ?assertEqual(<<"example.com:443">>, WsReq#wsReq.path).
+
+patch_method_is_normalized_test() ->
+   Req = <<"PATCH /resource HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual('PATCH', (State#wsState.wsReq)#wsReq.method).
 
 origin_form_explicit_host_port_test() ->
    Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
