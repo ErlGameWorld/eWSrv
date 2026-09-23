@@ -349,14 +349,26 @@ sendHandlerFrame(Socket, Opcode, Payload, WebState) ->
       {error, Reason} -> {close, {send_frame, Reason}, WebState}
    end.
 
+sendFrame(Socket, Opcode, Payload0)
+   when Opcode =:= ?WsOpBinary; Opcode =:= ?WsOpCF ->
+   %% Binary/continuation payload 不需要 UTF-8 或 close-code 检查。直接保留
+   %% 业务 iodata，避免大型分片为了发帧先整体复制成一个 binary。
+   try
+      PayloadLen = iolist_size(Payload0),
+      wsNet:send(Socket, frameIodataSized(Opcode, Payload0, PayloadLen))
+   catch
+      error:badarg -> {error, invalid_payload}
+   end;
 sendFrame(Socket, Opcode, Payload0) ->
-   Payload = iolist_to_binary(Payload0),
-   case validateOutboundFrame(Opcode, Payload) of
-      ok ->
-         %% Socket accepts iodata: keep header and payload separate so large
-         %% WebSocket messages are not copied into another full-size binary.
-         wsNet:send(Socket, frameIodata(Opcode, Payload));
-      {error, _} = Error -> Error
+   %% Text/control frame 需要逐字节协议校验，因此这里仍规范成 binary。
+   try iolist_to_binary(Payload0) of
+      Payload ->
+         case validateOutboundFrame(Opcode, Payload) of
+            ok -> wsNet:send(Socket, frameIodata(Opcode, Payload));
+            {error, _} = Error -> Error
+         end
+   catch
+      error:badarg -> {error, invalid_payload}
    end.
 
 validateOutboundFrame(?WsOpText, Payload) ->
@@ -388,7 +400,9 @@ encodeFrame(Opcode, Payload0) ->
    iolist_to_binary(frameIodata(Opcode, Payload)).
 
 frameIodata(Opcode, Payload) ->
-   PayloadLen = byte_size(Payload),
+   frameIodataSized(Opcode, Payload, byte_size(Payload)).
+
+frameIodataSized(Opcode, Payload, PayloadLen) ->
    Header =
       if
          PayloadLen < 126 ->
