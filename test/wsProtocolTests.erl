@@ -39,10 +39,21 @@ origin_form_transport_scheme_test() ->
    HttpReq = HttpState#wsState.wsReq,
    ?assertEqual(<<"http">>, HttpReq#wsReq.scheme),
    ?assertEqual(80, HttpReq#wsReq.port),
+   ?assertEqual(<<"/">>, HttpReq#wsReq.path),
+   ?assertEqual([], HttpReq#wsReq.args),
    {wsDone, HttpsState} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
    HttpsReq = HttpsState#wsState.wsReq,
    ?assertEqual(<<"https">>, HttpsReq#wsReq.scheme),
    ?assertEqual(443, HttpsReq#wsReq.port).
+
+origin_form_query_keeps_existing_semantics_test() ->
+   Req = <<"GET /params?a=1&b=two HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(<<"/params">>, WsReq#wsReq.path),
+   Args = maps:from_list(WsReq#wsReq.args),
+   ?assertEqual(<<"1">>, maps:get(<<"a">>, Args)),
+   ?assertEqual(<<"two">>, maps:get(<<"b">>, Args)).
 
 origin_form_explicit_host_port_test() ->
    Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
@@ -72,6 +83,20 @@ chunked_pipeline_rest_test() ->
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true}),
    ?assertEqual(<<"a">>, (State#wsState.wsReq)#wsReq.body),
    ?assertMatch(<<"GET /next", _/binary>>, State#wsState.buffer).
+
+websocket_handshake_header_names_are_case_insensitive_test() ->
+   Key = base64:encode(<<0:128>>),
+   Req = #wsReq{
+      method = 'GET',
+      version = {1, 1},
+      headers = [
+         {<<"connection">>, <<"Upgrade">>},
+         {<<"UPGRADE">>, <<"websocket">>},
+         {<<"sec-websocket-version">>, <<"13">>},
+         {<<"SEC-WEBSOCKET-KEY">>, Key}
+      ]
+   },
+   ?assertMatch({ok, _}, wsWebSocket:tryWsUpgrade(Req)).
 
 websocket_rejects_unmasked_client_frame_test() ->
    Frame = <<1:1, 0:3, ?WsOpText:4, 0:1, 1:7, "x">>,
