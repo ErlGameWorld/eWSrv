@@ -22,6 +22,8 @@ handle('GET', <<"/large">>, _Req) ->
    {ok, [{<<"content-type">>, <<"application/octet-stream">>}], benchBody(body_100k, 100000)};
 handle('GET', <<"/1m">>, _Req) ->
    {ok, [{<<"content-type">>, <<"application/octet-stream">>}], benchBody(body_1m, 1024 * 1024)};
+handle('GET', <<"/informational-final">>, _Req) ->
+   {103, [{<<"link">>, <<"</style.css>; rel=preload">>}], <<"must-not-be-final">>};
 handle('GET', <<"/reset-content">>, _Req) ->
    {205, [{<<"content-type">>, <<"text/plain">>}], <<"must-not-be-sent">>};
 handle('POST', <<"/echo">>, #wsReq{body = Body}) ->
