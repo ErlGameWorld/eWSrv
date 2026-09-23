@@ -119,7 +119,9 @@ frame(Type, StreamId, Payload) ->
 frame(Type, StreamId, Payload, Flags) ->
    %% Socket API 原生接受 iodata。这里只需要长度来编码 9-byte frame header，
    %% 不应该为了发包先把 HPACK/SETTINGS/DATA 的 iolist 扁平化复制一遍。
-   Size = iolist_size(Payload),
+   frameSized(Type, StreamId, Payload, Flags, iolist_size(Payload)).
+
+frameSized(Type, StreamId, Payload, Flags, Size) ->
    [<<Size:24, (typeNum(Type)):8, Flags:8, 0:1, StreamId:31>>, Payload].
 
 %% @doc 构造 SETTINGS frame，只携带本端想显式设定的项。
@@ -198,7 +200,7 @@ headersFrames(Block, StreamId, MaxFrame, EndStream) ->
       true ->
          %% 绝大多数 HPACK block 只有几百字节。frame/4 原生接受 iodata，
          %% 不要为了单个 HEADERS frame 先把整个 HPACK iolist 复制成 binary。
-         frame(headers, StreamId, Block, BaseFlags bor ?FLAG_END_HEADERS);
+         frameSized(headers, StreamId, Block, BaseFlags bor ?FLAG_END_HEADERS, Size);
       false ->
          %% 只有真的需要 CONTINUATION 时才扁平化，便于按字节边界切分。
          [First | Rest] = splitPayload(iolist_to_binary(Block), MaxFrame),
