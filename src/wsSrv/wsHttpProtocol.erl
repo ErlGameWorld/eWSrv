@@ -27,7 +27,7 @@ request(reqLine, Data0, Socket, State) ->
             true ->
                {err_code, 414};
             false ->
-               case parsePath(RawPath) of
+               case parseRequestTarget(Method, RawPath) of
                   {ok, Scheme0, Host, Port, Path, URLArgs} ->
                      Scheme = requestScheme(Scheme0, State),
                      WsReq = #wsReq{
@@ -444,6 +444,20 @@ parsePort(Bin) ->
    catch
       _:_ -> error
    end.
+
+parseRequestTarget('OPTIONS', '*') ->
+   {ok, undefined, undefined, undefined, <<"*">>, []};
+parseRequestTarget(_Method, '*') ->
+   {error, invalid_request_target};
+parseRequestTarget('CONNECT', Target) when is_binary(Target) ->
+   case parseHostHeader(Target, undefined) of
+      {Host, Port} when is_integer(Port) ->
+         {ok, undefined, Host, Port, Target, []};
+      _ ->
+         {error, invalid_connect_target}
+   end;
+parseRequestTarget(_Method, RawPath) ->
+   parsePath(RawPath).
 
 parsePath({abs_path, FullPath}) when is_binary(FullPath) ->
    %% origin-form = absolute-path [ "?" query ]。HTTP request-target 不含 fragment，
