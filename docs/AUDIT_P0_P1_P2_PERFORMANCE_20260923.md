@@ -121,6 +121,7 @@
 - Host/authority 使用 `binary:match`，避免全局 split 临时列表。
 - Connection token 在读请求头时只解析一次，响应阶段直接使用缓存语义。
 - 单 segment request body 直接复用 binary，不再 `reverse + iolist_to_binary` 复制。
+- origin-form 带 query 时也改为 `binary:match/2 + binary pattern` 定位，避免 `binary:split/2` 临时列表。
 
 ### 3.3 HTTP/1 响应
 
@@ -173,7 +174,14 @@ Huffman：
 - 原因：对不适合 Huffman 的短字符串，先生成编码结果再丢弃可能是负优化。
 - 这部分应由 HPACK header corpus benchmark 决定，而不是仅凭代码形态改写。
 
-### 3.6 WebSocket
+### 3.6 异常路径 / 运维稳定性
+
+- H1/H2 handler 非法返回或异常时不再把完整 `#wsReq{}`（尤其大 body）格式化进日志。
+- WebSocket handler 非法返回时不再把完整长期 `WebState` 格式化进日志。
+- 日志保留 method/path/version/header count/body size、返回值形态以及有界深度 exception/stack。
+- 目的不是提高正常请求 benchmark，而是避免错误风暴把一次业务异常放大成大对象格式化、日志 IO 和内存压力。
+
+### 3.7 WebSocket
 
 接收：
 
@@ -183,6 +191,8 @@ Huffman：
 发送：
 
 - `sendFrame/3` 改为内部 iodata `[FrameHeader, Payload]` 直接发 socket。
+- binary / continuation frame 可直接接受业务 iodata，通过 `iolist_size/1` 编码长度，不再先整体 flatten。
+- text/control frame 因 UTF-8、close-code、125-byte control limit 校验仍规范成 binary。
 - 大 payload 不再为了 frame 再复制进一个完整新 binary。
 - 公共 `encodeFrame/2` 仍返回单 binary，保持 API 兼容。
 
