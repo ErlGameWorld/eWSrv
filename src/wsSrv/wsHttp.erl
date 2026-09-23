@@ -675,15 +675,13 @@ doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Ver
       ok -> Policy;
       _ -> close
    end;
-doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version, _ReqConn) ->
-   %% chunk framing由框架生成，因此Content-Length和业务层自带的
-   %% Transfer-Encoding都必须移除，避免线路格式与响应头声明不一致。
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
-   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
-   ResponseHeaders = addConnectionHeader(
+doResponse({chunk, UserHeaders0, Initial}, Socket, _ReqHeaders, Method, Version, ReqConn) ->
+   %% framing headers由框架生成；prepareResponseHeaders/1 同时完成安全校验。
+   {UserHeaders, UserClose} = prepareResponseHeaders(UserHeaders0),
+   Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+   ResponseHeaders = addConnectionHeaderPrepared(
       [{<<"Transfer-Encoding">>, <<"chunked">>} | UserHeaders], Policy, Version),
-   case sendResponse(Socket, Method, 200, ResponseHeaders, <<>>) of
+   case sendPreparedResponse(Socket, Method, 200, ResponseHeaders, <<>>) of
       ok ->
          case Method of
             'HEAD' ->
@@ -713,12 +711,11 @@ doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version, _
       ok -> keep_ws;
       _ -> close
    end;
-doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version, _ReqConn) ->
-   Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
-   %% 文件响应由框架确定长度/Range，不能保留业务层自带TE或CL。
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
-   ResponseHeaders = addConnectionHeader(UserHeaders, Policy, Version),
+doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, _ReqHeaders, Method, Version, ReqConn) ->
+   %% 文件响应由框架确定长度/Range；用户头只扫描一次。
+   {UserHeaders, UserClose} = prepareResponseHeaders(UserHeaders0),
+   Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+   ResponseHeaders = addConnectionHeaderPrepared(UserHeaders, Policy, Version),
    case wsUtil:fileSize(Filename) of
       {error, _FileError} ->
          sendSrvError(Socket),
@@ -729,19 +726,19 @@ doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeade
                undefined ->
                   FileHeaders = [{<<"Content-Length">>, Size} | ResponseHeaders],
                   case Method of
-                     'HEAD' -> sendResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
-                     _ -> sendFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
+                     'HEAD' -> sendPreparedResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
+                     _ -> sendPreparedFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
                   end;
                {Offset, Length} ->
                   ERange = wsUtil:encodeRange({Offset, Length}, Size),
                   FileHeaders = [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange} | ResponseHeaders],
                   case Method of
-                     'HEAD' -> sendResponse(Socket, Method, 206, FileHeaders, <<>>);
-                     _ -> sendFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
+                     'HEAD' -> sendPreparedResponse(Socket, Method, 206, FileHeaders, <<>>);
+                     _ -> sendPreparedFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
                   end;
                invalid_range ->
                   ERange = wsUtil:encodeRange(invalid_range, Size),
-                  sendResponse(Socket, Method, 416,
+                  sendPreparedResponse(Socket, Method, 416,
                      [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>)
             end,
          case Ret of
@@ -915,6 +912,18 @@ addVary(Hs) ->
    Range :: wsUtil:range().
 sendFile(Socket, Code, Headers, Filename, Range) ->
    ResponseHeaders = httpResponse(Code, Headers, <<>>),
+   case file:open(Filename, [read, raw, binary]) of
+      {ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
+      {error, _FileError} = Err ->
+         sendSrvError(Socket),
+         Err
+   end.
+
+sendPreparedFile(Socket, Code, Headers, Filename, Range) ->
+   ResponseHeaders = [
+      <<"HTTP/1.1 ">>, status(Code), <<"\r\n">>,
+      spellPreparedHeaders(Headers), <<"\r\n">>
+   ],
    case file:open(Filename, [read, raw, binary]) of
       {ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
       {error, _FileError} = Err ->
