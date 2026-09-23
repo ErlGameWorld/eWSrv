@@ -323,12 +323,11 @@ parseChunkedState(Data, #wsState{chunkState = trailers, maxHeaderSize = MaxHeade
                case parseChunkTrailers(<<Trailers/binary, "\r\n\r\n">>, 0, []) of
                   {ok, TrailerHeaders} ->
                      Body = finishBody(Acc),
-                     ReqHeaders = WsReq#wsReq.headers,
                      {wsDone, State#wsState{
                         buffer = Rest, bodyAcc = [], chunkState = size,
                         wsReq = WsReq#wsReq{
                            body = Body,
-                           headers = ReqHeaders ++ TrailerHeaders
+                           trailers = TrailerHeaders
                         }
                      }};
                   {error, _} = Error ->
