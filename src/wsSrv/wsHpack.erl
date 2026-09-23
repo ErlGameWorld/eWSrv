@@ -22,6 +22,7 @@
    new/0
    , new/1
    , encode/2
+   , encodeLower/2
    , decode/2
    , maxTableSize/1
    , setMax/2
@@ -100,10 +101,28 @@ setMax(Max, Ctx = #ctx{dyn = Dyn, size = Size, sentMax = Sent, minPending = Min0
 -spec encode([{binary(), binary()}], ctx()) -> {iodata(), ctx()}.
 encode(Headers, Ctx0) ->
    {Su, Ctx1} = sizeUpdatePrefix(Ctx0),
-   %% 归一化与编码融合成一趟：早先先 comprehension 出一份中间列表，
-   %% 每个头部块都要多分配一遍。
-   {IoList, Ctx} = lists:mapfoldl(fun(H, C) -> encodeOne(entry(H), C) end, Ctx1, Headers),
+   {IoList, Ctx} = encodeHeaders(Headers, Ctx1, []),
    {[Su | IoList], Ctx}.
+
+%% @doc Encode headers that have already been normalized to lowercase binary
+%% names by the HTTP/2 response layer. Avoids rescanning every name in HPACK.
+-spec encodeLower([{binary(), binary() | iodata()}], ctx()) -> {iodata(), ctx()}.
+encodeLower(Headers, Ctx0) ->
+   {Su, Ctx1} = sizeUpdatePrefix(Ctx0),
+   {IoList, Ctx} = encodeLowerHeaders(Headers, Ctx1, []),
+   {[Su | IoList], Ctx}.
+
+encodeHeaders([], Ctx, Acc) ->
+   {lists:reverse(Acc), Ctx};
+encodeHeaders([H | Rest], Ctx0, Acc) ->
+   {Io, Ctx1} = encodeOne(entry(H), Ctx0),
+   encodeHeaders(Rest, Ctx1, [Io | Acc]).
+
+encodeLowerHeaders([], Ctx, Acc) ->
+   {lists:reverse(Acc), Ctx};
+encodeLowerHeaders([{Name, Value} | Rest], Ctx0, Acc) when is_binary(Name) ->
+   {Io, Ctx1} = encodeOne({Name, toBinary(Value)}, Ctx0),
+   encodeLowerHeaders(Rest, Ctx1, [Io | Acc]).
 
 %% 动态表大小更新（RFC 7541 §4.2）：上限一经 setMax 改动，就必须在
 %% 改动之后的第一个头部块开头发出 001xxxxx 指令，否则对端仍按旧上限
