@@ -603,7 +603,13 @@ finishTrailers(StreamId, EndStream, Headers, Rest, State0) ->
                      applyFrames(Rest, State0);
                   Stream ->
                      Req0 = maps:get(req, Stream),
-                     Req = Req0#wsReq{headers = Req0#wsReq.headers ++ internalHeaders(Headers)},
+                     TrailerHeaders = internalHeaders(Headers),
+                     %% Keep legacy merged headers for compatibility, but expose
+                     %% the trailer section explicitly through #wsReq.trailers.
+                     Req = Req0#wsReq{
+                        headers = Req0#wsReq.headers ++ TrailerHeaders,
+                        trailers = TrailerHeaders
+                     },
                      Stream1 = Stream#{req => Req},
                      State1 = State0#{streams => Streams#{StreamId := Stream1}},
                      case validateRequestLength(Stream1) of
