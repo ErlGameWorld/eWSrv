@@ -49,7 +49,12 @@ listenOpt() |                 %% eNet相关配置
 -type wsMethod() :: 'OPTIONS' | 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'CONNECT' | 'TRACE' | binary().
 -type wsBody() :: binary() | iolist().
 -type wsPath() :: binary().
--type wsHeader() :: {Key :: atom(), Value :: binary() | string()}.
+%% H1 decode_packet 会把常见字段名表示成 atom，H2/自定义字段通常是 binary；
+%% 响应层同时接受常见的 integer/atom value 并在上线路前转成 binary。
+-type wsHeader() :: {
+   Key :: header_key(),
+   Value :: binary() | string() | integer() | atom()
+}.
 -type wsHeaders() :: [wsHeader()].
 -type wsHttpCode() :: 100..999.
 -type wsVersion() :: {0, 9} | {1, 0} | {1, 1} | {2, 0}.
