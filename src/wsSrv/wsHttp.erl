@@ -1013,8 +1013,10 @@ startChunkLoop(Socket) ->
    %% Streaming期间只预读一个客户端包：既能在空闲时及时收到 *_closed，
    %% 又不会因为客户端持续pipeline而无限把请求数据搬进本进程mailbox。
    %% 一旦收到数据，{active,1} 自动转回passive，内核接收缓冲自然形成背压。
-   wsNet:setopts(Socket, [{active, 1}]),
-   ?MODULE:chunkLoop(Socket).
+   case wsNet:setopts(Socket, [{active, 1}]) of
+      ok -> ?MODULE:chunkLoop(Socket);
+      {error, Reason} -> {error, {setopts, Reason}}
+   end.
 
 chunkLoop(Socket) ->
    receive
@@ -1026,6 +1028,10 @@ chunkLoop(Socket) ->
          {error, client_closed};
       {ssl_error, Socket, _Reason} ->
          {error, client_closed};
+      {'EXIT', _Pid, Reason} ->
+         %% 常见 producer 会 spawn_link 到连接进程。若 producer 在发送 close
+         %% 前异常退出，不能永远卡在 chunkLoop 等一个不会到来的消息。
+         {error, {stream_producer_exit, Reason}};
       {tcp_passive, Socket} ->
          %% 不在stream期间继续re-arm；否则未匹配的pipeline数据会无界堆mailbox。
          ?MODULE:chunkLoop(Socket);
@@ -1034,17 +1040,24 @@ chunkLoop(Socket) ->
       {chunk, close} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
-               _ = wsNet:setopts(Socket, [{active, ?ActionN}]),
-               ok;
+               case wsNet:setopts(Socket, [{active, ?ActionN}]) of
+                  ok -> ok;
+                  {error, Reason} -> {error, {setopts, Reason}}
+               end;
             {error, _Reason} ->
                {error, client_closed}
          end;
       {chunk, close, From} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
-               _ = wsNet:setopts(Socket, [{active, ?ActionN}]),
-               From ! {self(), ok},
-               ok;
+               case wsNet:setopts(Socket, [{active, ?ActionN}]) of
+                  ok ->
+                     From ! {self(), ok},
+                     ok;
+                  {error, Reason} ->
+                     From ! {self(), {error, closed}},
+                     {error, {setopts, Reason}}
+               end;
             {error, _Reason} ->
                From ! {self(), {error, closed}},
                {error, client_closed}
