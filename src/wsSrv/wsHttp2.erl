@@ -2117,9 +2117,11 @@ prepareSendBuffer(StreamId, State0) ->
 fillFileBuffer(StreamId, Stream, Fd, Offset, Left, State0) ->
    ConnWin = maps:get(send_conn_window, State0),
    StreamWin = maps:get(send_window, Stream),
-   MaxFrame = maps:get(peer_max_frame, State0),
-   %% 一次多读一些，由 flushPending 按 max_frame 再切帧，减少 pread 次数。
-   ReadMax = erlang:max(MaxFrame, 262144),
+   %% 文件读取批量与单次 DATA frame 上限是两件事。peer 可以把
+   %% SETTINGS_MAX_FRAME_SIZE 提到接近 16MB，但不应因此让每个 stream
+   %% 一次 pread/持有十几 MB。按发送 batch 上限读取，随后再按 peer
+   %% max_frame 切帧，兼顾 syscall 数、内存峰值和多 stream 公平性。
+   ReadMax = ?SEND_BATCH_BYTES,
    N = erlang:max(0, lists:min([Left, ConnWin, StreamWin, ReadMax])),
    case N of
       0 ->
