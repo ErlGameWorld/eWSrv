@@ -94,11 +94,13 @@ toBin(V) when is_atom(V) -> atom_to_binary(V, utf8);
 toBin(V) when is_integer(V) -> integer_to_binary(V);
 toBin(V) when is_list(V) -> iolist_to_binary(V).
 
-%% 字段值禁止 CR / LF / NUL（防响应拆分）。单遍扫描比连续三次
-%% binary:match/2 快约 8 倍，H1/H2 校验共用。
+%% RFC field-value 不允许 ASCII 控制字符；HTAB(0x09) 是唯一允许的 C0 例外。
+%% H2 另外在调用侧禁止首尾 SP/HTAB。保持单遍扫描，不增加正常热路径遍历。
 noCtlChars(<<>>) ->
    true;
-noCtlChars(<<C, _/binary>>) when C =:= $\r; C =:= $\n; C =:= 0 ->
+noCtlChars(<<C, _/binary>>) when C < 32, C =/= 9 ->
+   false;
+noCtlChars(<<127, _/binary>>) ->
    false;
 noCtlChars(<<_, Rest/binary>>) ->
    noCtlChars(Rest).
