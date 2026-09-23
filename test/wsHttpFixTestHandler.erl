@@ -42,7 +42,8 @@ handle('GET', <<"/unsafe-headers">>, _Req) ->
    {200, [
       {<<"X-Good">>, <<"ok">>},
       {<<"X-Bad\r\nX-Injected">>, <<"yes">>},
-      {<<"X-Value">>, <<"ok\r\nX-Injected: yes">>}
+      {<<"X-Value">>, <<"ok\r\nX-Injected: yes">>},
+      {<<"X-Ctl">>, <<1>>}
    ], <<"safe">>};
 handle('GET', <<"/informational-final">>, _Req) ->
    %% Handler API returns one final response only. 1xx requires a separate
