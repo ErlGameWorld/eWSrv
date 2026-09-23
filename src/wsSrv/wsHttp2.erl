@@ -4,6 +4,7 @@
 
 -export([
    new/6
+   , new/8
    , start/1
    , handleData/2
    , handleResponse/5
@@ -51,6 +52,12 @@
 %% module is a protocol state machine and performs writes through wsNet.
 -spec new(wsSocket(), module(), http | https, non_neg_integer() | infinity, pos_integer(), pos_integer()) -> map().
 new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
+   new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout,
+      ?DEFAULT_MAX_STREAMS, ?DEFAULT_WINDOW).
+
+-spec new(wsSocket(), module(), http | https, non_neg_integer() | infinity,
+   pos_integer(), pos_integer(), pos_integer(), 65535..2147483647) -> map().
+new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout, MaxConcurrent, ReceiveWindow) ->
    #{
       socket => Socket,
       ws_mod => WsMod,
@@ -73,12 +80,14 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       peer_max_concurrent => infinity,
       peer_max_header_list => infinity,
       send_conn_window => ?DEFAULT_WINDOW,
+      %% connection receive window 的协议初值固定是 65535；start/1 在
+      %% ReceiveWindow 更大时发送 connection WINDOW_UPDATE 后再同步本地值。
       recv_conn_window => ?DEFAULT_WINDOW,
-      local_initial_window => ?DEFAULT_WINDOW,
+      local_initial_window => ReceiveWindow,
       max_body => MaxBody,
       max_header => MaxHeader,
       request_timeout => RequestTimeout,
-      max_concurrent_streams => ?DEFAULT_MAX_STREAMS,
+      max_concurrent_streams => MaxConcurrent,
       goaway => false,
       pending_conn_credit => 0,
       pending_stream_credits => #{},
@@ -91,20 +100,36 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
    }.
 
 -spec start(map()) -> {ok, map()} | {error, term()}.
-start(State) ->
+start(State0) ->
+   ReceiveWindow = maps:get(local_initial_window, State0),
    Settings = [
       {header_table_size, ?LOCAL_HEADER_TABLE_SIZE},
       {enable_push, 0},
-      {max_concurrent_streams, maps:get(max_concurrent_streams, State)},
-      {initial_window_size, maps:get(local_initial_window, State)},
+      {max_concurrent_streams, maps:get(max_concurrent_streams, State0)},
+      {initial_window_size, ReceiveWindow},
       {max_frame_size, ?DEFAULT_MAX_FRAME},
-      {max_header_list_size, maps:get(max_header, State)}
+      {max_header_list_size, maps:get(max_header, State0)}
    ],
-   case wsNet:send(maps:get(socket, State), wsHttp2Frame:settingsFrame(Settings)) of
+   %% SETTINGS_INITIAL_WINDOW_SIZE 只调整 stream window，connection window
+   %% 仍从 65535 起步。配置大接收窗时必须另发 stream-id 0 WINDOW_UPDATE。
+   Frames =
+      case ReceiveWindow - ?DEFAULT_WINDOW of
+         0 ->
+            wsHttp2Frame:settingsFrame(Settings);
+         Delta when Delta > 0 ->
+            [wsHttp2Frame:settingsFrame(Settings),
+             wsHttp2Frame:windowUpdateFrame(0, Delta)]
+      end,
+   case wsNet:send(maps:get(socket, State0), Frames) of
       ok ->
          Token = make_ref(),
          Timer = erlang:send_after(?SETTINGS_ACK_TIMEOUT, self(), {h2_settings_ack_timeout, Token}),
-         {ok, State#{expect_settings_ack => true, settings_ack_timer => Timer, settings_ack_token => Token}};
+         {ok, State0#{
+            recv_conn_window => ReceiveWindow,
+            expect_settings_ack => true,
+            settings_ack_timer => Timer,
+            settings_ack_token => Token
+         }};
       {error, Reason} -> {error, Reason}
    end.
 
