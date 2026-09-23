@@ -1235,13 +1235,34 @@ callHandler(WsMod, Method, Path, Req) ->
       {wsUpgrade, _Headers} ->
          {response, 501, [], <<"WebSocket over HTTP/2 not enabled">>};
       Unexpected ->
-         ?wsErr("HTTP/2 handler unexpected return req=~p ret=~p", [Req, Unexpected]),
+         ?wsErr("HTTP/2 handler unexpected return req=~p ret_shape=~p",
+            [requestLogInfo(Req), returnShape(Unexpected)]),
          {response, 500, [], <<"Internal server error">>}
    catch
       Class:Reason:Stacktrace ->
-         ?wsErr("HTTP/2 handler exception ~p:~p ~p", [Class, Reason, Stacktrace]),
+         ?wsErr("HTTP/2 handler exception req=~p ~p:~P stack=~P",
+            [requestLogInfo(Req), Class, Reason, 8, Stacktrace, 12]),
          {response, 500, [], <<"Internal server error">>}
    end.
+
+requestLogInfo(#wsReq{method = Method, path = Path, version = Version, headers = Headers, body = Body}) ->
+   {Method, Path, Version, length(Headers), safeBodySize(Body)}.
+
+safeBodySize(Body) ->
+   try iolist_size(Body) catch _:_ -> unknown end.
+
+returnShape(Term) when is_binary(Term) -> {binary, byte_size(Term)};
+returnShape(Term) when is_list(Term) -> list;
+returnShape(Term) when is_map(Term) -> {map, map_size(Term)};
+returnShape(Term) when is_tuple(Term), tuple_size(Term) > 0 ->
+   case element(1, Term) of
+      Tag when is_atom(Tag) -> {tuple, tuple_size(Term), Tag};
+      _ -> {tuple, tuple_size(Term)}
+   end;
+returnShape(Term) when is_atom(Term) -> Term;
+returnShape(Term) when is_integer(Term) -> integer;
+returnShape(Term) when is_float(Term) -> float;
+returnShape(_) -> other.
 
 sendHandlerResponse(StreamId, {file, Code, Headers, Filename, Range}, Req, State) ->
    Method = Req#wsReq.method,
