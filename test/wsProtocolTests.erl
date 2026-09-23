@@ -119,6 +119,33 @@ chunked_pipeline_rest_test() ->
    ?assertEqual(<<"a">>, (State#wsState.wsReq)#wsReq.body),
    ?assertMatch(<<"GET /next", _/binary>>, State#wsState.buffer).
 
+chunked_trailers_are_exposed_to_handler_test() ->
+   Req = <<
+      "POST / HTTP/1.1\r\n",
+      "Host: localhost\r\n",
+      "Transfer-Encoding: chunked\r\n",
+      "\r\n",
+      "1\r\na\r\n0\r\n",
+      "X-Checksum: ok\r\n\r\n"
+   >>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true}),
+   Headers = (State#wsState.wsReq)#wsReq.headers,
+   ?assert(lists:any(fun({K, V}) ->
+      wsUtil:headerNameEq(K, <<"X-Checksum">>) andalso V =:= <<"ok">>
+   end, Headers)).
+
+chunked_forbidden_trailer_is_rejected_test() ->
+   Req = <<
+      "POST / HTTP/1.1\r\n",
+      "Host: localhost\r\n",
+      "Transfer-Encoding: chunked\r\n",
+      "\r\n",
+      "1\r\na\r\n0\r\n",
+      "Content-Length: 1\r\n\r\n"
+   >>,
+   ?assertMatch({error, forbidden_trailer},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true})).
+
 websocket_handshake_header_names_are_case_insensitive_test() ->
    Key = base64:encode(<<0:128>>),
    Req = #wsReq{
