@@ -1180,16 +1180,16 @@ callHandler(WsMod, Method, Path, Req) ->
       {ok, Headers, Body} -> {response, 200, Headers, Body};
       {ok, Body} -> {response, 200, [], Body};
       {HttpCode, Headers, {file, Filename}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, []};
       {HttpCode, Headers, {file, Filename, Range}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, Range};
       {HttpCode, Headers, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {response, HttpCode, Headers, Body};
       {HttpCode, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {response, HttpCode, [], Body};
       {chunk, Headers} ->
          {chunk, Headers, <<>>};
