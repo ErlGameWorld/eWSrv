@@ -116,12 +116,10 @@ frame(Type, StreamId, Payload) ->
 %% @param Flags 各 flag 宏的按位或
 -spec frame(frame_type(), non_neg_integer(), iodata(), non_neg_integer()) -> iodata().
 frame(Type, StreamId, Payload, Flags) ->
-   Body = iolist_to_binary(Payload),
-   Size = byte_size(Body),
-   %% 9 字节 frame 头：24 位长度 + 8 位类型 + 8 位 flag + 1 位保留位
-   %% （必须为 0）+ 31 位 stream id。保留位占最高位，所以 stream id
-   %% 只取低 31 位，与 RFC 9113 4.1 的位布局一一对应。
-   [<<Size:24, (typeNum(Type)):8, Flags:8, 0:1, StreamId:31>>, Body].
+   %% Socket API 原生接受 iodata。这里只需要长度来编码 9-byte frame header，
+   %% 不应该为了发包先把 HPACK/SETTINGS/DATA 的 iolist 扁平化复制一遍。
+   Size = iolist_size(Payload),
+   [<<Size:24, (typeNum(Type)):8, Flags:8, 0:1, StreamId:31>>, Payload].
 
 %% @doc 构造 SETTINGS frame，只携带本端想显式设定的项。
 %% 未列出的项保持当前值（双方初始都按协议默认值），因此对端无需回显
@@ -198,13 +196,14 @@ headersFrames(Block, StreamId, MaxFrame, EndStream) ->
       [] -> frame(headers, StreamId, <<>>, BaseFlags bor ?FLAG_END_HEADERS);
       [Last] -> frame(headers, StreamId, Last, BaseFlags bor ?FLAG_END_HEADERS);
       [First | Rest] ->
-         N = length(Rest),
-         Conts = [begin
-            Flags = case I =:= N of true -> ?FLAG_END_HEADERS; false -> 0 end,
-            frame(continuation, StreamId, Chunk, Flags)
-         end || {I, Chunk} <- lists:zip(lists:seq(1, N), Rest)],
-         [frame(headers, StreamId, First, BaseFlags) | Conts]
+         [frame(headers, StreamId, First, BaseFlags) |
+            continuationFrames(Rest, StreamId)]
    end.
+
+continuationFrames([Last], StreamId) ->
+   [frame(continuation, StreamId, Last, ?FLAG_END_HEADERS)];
+continuationFrames([Chunk | Rest], StreamId) ->
+   [frame(continuation, StreamId, Chunk, 0) | continuationFrames(Rest, StreamId)].
 
 %% @doc 把消息体切成 DATA frame 序列，最后一帧带 END_STREAM。
 %% 空 body 也要发一个带 END_STREAM 的空 DATA，否则对端不知道响应已结束。
@@ -214,9 +213,12 @@ headersFrames(Block, StreamId, MaxFrame, EndStream) ->
 dataFrames(<<>>, StreamId, _MaxFrame) ->
    frame(data, StreamId, <<>>, ?FLAG_END_STREAM);
 dataFrames(Body, StreamId, MaxFrame) ->
-   Chunks = splitPayload(Body, MaxFrame),
-   N = length(Chunks),
-	[frame(data, StreamId, Chunk, case I =:= N of true -> ?FLAG_END_STREAM; false -> 0 end) || {I, Chunk} <- lists:zip(lists:seq(1, N), Chunks)].
+   dataFramesLoop(Body, StreamId, MaxFrame).
+
+dataFramesLoop(Bin, StreamId, MaxFrame) when byte_size(Bin) =< MaxFrame ->
+   frame(data, StreamId, Bin, ?FLAG_END_STREAM);
+dataFramesLoop(<<Chunk:MaxFrame/binary, Rest/binary>>, StreamId, MaxFrame) ->
+   [frame(data, StreamId, Chunk, 0) | dataFramesLoop(Rest, StreamId, MaxFrame)].
 
 %% 把 binary 切成不超过 Max 字节的若干块（输入为空时才得到空列表）。
 -spec splitPayload(binary(), pos_integer()) -> [binary()].
