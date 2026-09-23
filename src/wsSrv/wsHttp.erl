@@ -762,7 +762,7 @@ normalizeContentLength(_Code, _Method, BodySize, Headers) ->
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
    Body = responseBody(Method, Code, UserBody),
    Response = httpResponse(Code, Headers, Body),
-   wsNet:send(Socket, Response).
+   sendWireResponse(Socket, Response).
 
 %% Normal-response hot path. Headers are already normalized and validated by
 %% prepareResponseHeaders/1; framework-owned headers are trusted values.
@@ -772,7 +772,21 @@ sendPreparedResponse(Socket, Method, Code, Headers, UserBody) ->
       <<"HTTP/1.1 ">>, status(Code), <<"\r\n">>,
       spellPreparedHeaders(Headers), <<"\r\n">>, Body
    ],
-   wsNet:send(Socket, Response).
+   sendWireResponse(Socket, Response).
+
+sendWireResponse(Socket, Response) ->
+   case wsNet:send(Socket, Response) of
+      ok ->
+         ok;
+      {error, Reason} = Error
+         when Reason =:= closed; Reason =:= econnreset; Reason =:= epipe;
+              Reason =:= einval; Reason =:= enotconn ->
+         ?wsWarn("send_response skipped, peer gone: ~p", [Reason]),
+         Error;
+      {error, Reason} = Error ->
+         ?wsErr("send_response error ~p", [Reason]),
+         Error
+   end.
 
 responseBody('HEAD', _Code, _UserBody) ->
    <<>>;
