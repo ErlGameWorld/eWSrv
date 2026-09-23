@@ -523,7 +523,8 @@ finishHeaderBlock(StreamId, Kind, EndStream, Block, Rest, State0) ->
          connError(compression_error, {hpack, Reason}, State0);
       {ok, Headers, Rx} ->
          State1 = State0#{rx_hpack => Rx, header_frames => none},
-         case headerListSize(Headers) > maps:get(max_header, State1) orelse length(Headers) > 100 of
+         {HeaderBytes, HeaderCount} = headerListStats(Headers),
+         case HeaderBytes > maps:get(max_header, State1) orelse HeaderCount > 100 of
             true ->
                State2 = streamError(StreamId, enhance_your_calm, State1),
                applyFrames(Rest, State2);
@@ -798,13 +799,16 @@ flushWindowUpdates(StreamId, State0) ->
    ConnPending = maps:get(wu_conn_pending, State0, 0),
    State1 = State0#{streams => Streams1, wu_conn_pending => 0},
    Frames =
-      case ConnPending > 0 of
-         true -> [wsHttp2Frame:windowUpdateFrame(0, ConnPending)];
-         false -> []
-      end
-      ++ case StreamPending > 0 of
-         true -> [wsHttp2Frame:windowUpdateFrame(StreamId, StreamPending)];
-         false -> []
+      case {ConnPending > 0, StreamPending > 0} of
+         {true, true} ->
+            [wsHttp2Frame:windowUpdateFrame(0, ConnPending),
+             wsHttp2Frame:windowUpdateFrame(StreamId, StreamPending)];
+         {true, false} ->
+            [wsHttp2Frame:windowUpdateFrame(0, ConnPending)];
+         {false, true} ->
+            [wsHttp2Frame:windowUpdateFrame(StreamId, StreamPending)];
+         {false, false} ->
+            []
       end,
    case Frames of
       [] ->
@@ -997,8 +1001,7 @@ handleStreamStart(StreamId, WorkerPid, Token, Req, Headers0, Initial0, State0) -
          {ok, State};
       {ok, Stream0, State} ->
          Method = Req#wsReq.method,
-         Headers1 = normalizeResponseHeaders(Headers0, []),
-         Headers = lists:keydelete(<<"content-length">>, 1, Headers1),
+         Headers = normalizeResponseHeaders(Headers0, []),
          H2Headers = [{<<":status">>, <<"200">>} | Headers],
          Tx0 = maps:get(tx_hpack, State),
          {Block, Tx} = wsHpack:encode(H2Headers, Tx0),
@@ -1324,15 +1327,14 @@ responseHeadersAllowed(Size, State) ->
       end.
 
 responseHeaders(Code, Headers0, BodySize, Method) ->
-   Headers1 = normalizeResponseHeaders(Headers0, []),
-   Headers2 = lists:keydelete(<<"content-length">>, 1, Headers1),
+   Headers = normalizeResponseHeaders(Headers0, []),
    case Code of
-      C when C >= 100, C < 200 -> Headers2;
-      204 -> Headers2;
-      205 -> [{<<"content-length">>, <<"0">>} | Headers2];
-      304 -> Headers2;
-      _ when Method =:= 'HEAD' -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers2];
-      _ -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers2]
+      C when C >= 100, C < 200 -> Headers;
+      204 -> Headers;
+      205 -> [{<<"content-length">>, <<"0">>} | Headers];
+      304 -> Headers;
+      _ when Method =:= 'HEAD' -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers];
+      _ -> [{<<"content-length">>, integer_to_binary(BodySize)} | Headers]
    end.
 
 normalizeResponseHeaders([], Acc) ->
@@ -1341,10 +1343,13 @@ normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
    %% 已是小写的 binary 不分配；handler 常给 <<"content-type">> 这类字面量。
    Name = wsUtil:ensureLower(toBinary(Name0)),
    Value = toBinary(Value0),
-   case {isHopByHop(Name), validMethod(Name), validHeaderValue(Value)} of
-      {true, _, _} ->
+   case {Name, isHopByHop(Name), validMethod(Name), validHeaderValue(Value)} of
+      {<<"content-length">>, _, _, _} ->
+         %% HTTP/2 framing owns content-length; never pass handler's copy through.
          normalizeResponseHeaders(Rest, Acc);
-      {false, true, true} ->
+      {_, true, _, _} ->
+         normalizeResponseHeaders(Rest, Acc);
+      {_, false, true, true} ->
          normalizeResponseHeaders(Rest, [{Name, Value} | Acc]);
       _ ->
          %% Handler-generated malformed fields must never corrupt the H2 stream.
@@ -1745,21 +1750,23 @@ defaultPort(<<"http">>) -> 80;
 defaultPort(_) -> undefined.
 
 parseContentLengthHeaders(Headers) ->
-   Values = [V || {<<"content-length">>, V} <- Headers],
-   case Values of
-      [] ->
-         undefined;
-      _ ->
-         case [parseContentLengthValue(V) || V <- Values] of
-            [N | Rest] when is_integer(N) ->
-               case lists:all(fun(V) -> V =:= N end, Rest) of
-                  true -> N;
-                  false -> {error, conflicting_content_length}
-               end;
-            _ ->
-               {error, invalid_content_length}
-         end
-   end.
+   parseContentLengthHeaders(Headers, undefined).
+
+parseContentLengthHeaders([], Seen) ->
+   Seen;
+parseContentLengthHeaders([{<<"content-length">>, Value} | Rest], undefined) ->
+   case parseContentLengthValue(Value) of
+      N when is_integer(N) -> parseContentLengthHeaders(Rest, N);
+      _ -> {error, invalid_content_length}
+   end;
+parseContentLengthHeaders([{<<"content-length">>, Value} | Rest], Seen) ->
+   case parseContentLengthValue(Value) of
+      Seen -> parseContentLengthHeaders(Rest, Seen);
+      N when is_integer(N) -> {error, conflicting_content_length};
+      _ -> {error, invalid_content_length}
+   end;
+parseContentLengthHeaders([_ | Rest], Seen) ->
+   parseContentLengthHeaders(Rest, Seen).
 
 parseContentLengthValue(Value) when is_binary(Value), Value =/= <<>>, byte_size(Value) =< 20 ->
    case allDecimalDigits(Value) of
@@ -1859,7 +1866,20 @@ internalHeaderName(<<"te">>) -> 'TE';
 internalHeaderName(Name) -> Name.
 
 headerListSize(Headers) ->
-   lists:sum([byte_size(toBinary(N)) + byte_size(toBinary(V)) + 32 || {N, V} <- Headers]).
+   {Size, _Count} = headerListStats(Headers),
+   Size.
+
+headerListStats(Headers) ->
+   headerListStats(Headers, 0, 0).
+
+headerListStats([], Size, Count) ->
+   {Size, Count};
+headerListStats([{N, V} | Rest], Size, Count) ->
+   headerListStats(
+      Rest,
+      Size + byte_size(toBinary(N)) + byte_size(toBinary(V)) + 32,
+      Count + 1
+   ).
 
 methodValue(<<"GET">>) -> 'GET';
 methodValue(<<"POST">>) -> 'POST';
