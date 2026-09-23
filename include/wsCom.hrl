@@ -19,7 +19,9 @@
    , {backlog, 4096}
 ]).
 
--define(ActionN, 64).
+%% 128 是 HTTP/1 keep-alive 压测长期使用的批量 active 水位。
+%% 64 会更频繁地产生 tcp_passive/inet:setopts 往返，增加高 QPS 固定开销。
+-define(ActionN, 128).
 
 %% HTTP/WebSocket 安全默认值。均可通过 openSrv/2,3 的 WsOpts 覆盖。
 -define(DefMaxBodySize, 8 * 1024 * 1024).
