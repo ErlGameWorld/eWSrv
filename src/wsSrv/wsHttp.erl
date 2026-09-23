@@ -1008,9 +1008,10 @@ sendRescueResponse(Socket, Code, Body) ->
 %% empty response, which signals that the connection should be
 %% closed. When the client closes the socket, the loop exits.
 startChunkLoop(Socket) ->
-   %% Set the socket to active so we receive the tcp_closed message
-   %% if the client closes the connection
-   wsNet:setopts(Socket, [{active, ?ActionN}]),
+   %% Streaming期间只预读一个客户端包：既能在空闲时及时收到 *_closed，
+   %% 又不会因为客户端持续pipeline而无限把请求数据搬进本进程mailbox。
+   %% 一旦收到数据，{active,1} 自动转回passive，内核接收缓冲自然形成背压。
+   wsNet:setopts(Socket, [{active, 1}]),
    ?MODULE:chunkLoop(Socket).
 
 chunkLoop(Socket) ->
@@ -1024,14 +1025,14 @@ chunkLoop(Socket) ->
       {ssl_error, Socket, _Reason} ->
          {error, client_closed};
       {tcp_passive, Socket} ->
-         wsNet:setopts(Socket, [{active, ?ActionN}]),
+         %% 不在stream期间继续re-arm；否则未匹配的pipeline数据会无界堆mailbox。
          ?MODULE:chunkLoop(Socket);
       {ssl_passive, Socket} ->
-         wsNet:setopts(Socket, [{active, ?ActionN}]),
          ?MODULE:chunkLoop(Socket);
       {chunk, close} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
+               _ = wsNet:setopts(Socket, [{active, ?ActionN}]),
                ok;
             {error, _Reason} ->
                {error, client_closed}
@@ -1039,6 +1040,7 @@ chunkLoop(Socket) ->
       {chunk, close, From} ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
+               _ = wsNet:setopts(Socket, [{active, ?ActionN}]),
                From ! {self(), ok},
                ok;
             {error, _Reason} ->
