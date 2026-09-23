@@ -435,7 +435,7 @@ selectSubprotocol([Protocol | Rest], Supported) ->
 
 deleteWsHeader(_Name, []) ->
    [];
-deleteWsHeader(Name, [{Key, Value} = Header | Rest]) ->
+deleteWsHeader(Name, [{Key, _Value} = Header | Rest]) ->
    case wsUtil:headerNameEq(Key, Name) of
       true -> deleteWsHeader(Name, Rest);
       false -> [Header | deleteWsHeader(Name, Rest)]
