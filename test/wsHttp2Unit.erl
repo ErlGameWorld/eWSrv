@@ -342,6 +342,33 @@ informationalFinalRejected() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+http2_streaming_response_respects_header_limit_test_() ->
+   {timeout, 20, fun streamingResponseHeaderLimit/0}.
+
+streamingResponseHeaderLimit() ->
+   Name = ws_http2_stream_header_limit_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>},
+         {<<":path">>, <<"/stream-oversized-header">>}
+      ],
+      {B, _Tx} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, internal_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
 http2_205_has_no_content_test_() ->
    {timeout, 20, fun noContent205/0}.
 
