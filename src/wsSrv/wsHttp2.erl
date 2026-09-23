@@ -714,9 +714,14 @@ applyData(Flags, StreamId, Payload, Rest, State0) ->
                                        Stream2 = maps:get(StreamId, maps:get(streams, State2)),
                                        case validateRequestLength(Stream2) of
                                           ok ->
-                                             case dispatchRequest(StreamId, flushStreamWindowUpdates(StreamId, State2)) of
-                                                {ok, State3} -> applyFrames(Rest, State3);
-                                                Stop -> Stop
+                                             case flushStreamWindowUpdates(StreamId, State2) of
+                                                {ok, State3} ->
+                                                   case dispatchRequest(StreamId, State3) of
+                                                      {ok, State4} -> applyFrames(Rest, State4);
+                                                      Stop -> Stop
+                                                   end;
+                                                {error, SockReason, State3} ->
+                                                   {stop, {socket_error, SockReason}, State3}
                                              end;
                                           {error, _} ->
                                              State3 = streamError(StreamId, protocol_error, State2),
@@ -792,10 +797,9 @@ replenishReceiveWindows(StreamId, FlowBytes, State0) ->
    end.
 
 flushStreamWindowUpdates(StreamId, State) ->
-   case flushWindowUpdates(StreamId, State) of
-      {ok, State1} -> State1;
-      {error, _Reason, State1} -> State1
-   end.
+   %% END_STREAM 前把尚未宣布的接收窗口 credit 冲掉。写失败意味着
+   %% connection transport 已不可可靠使用，绝不能吞错后继续启动 handler。
+   flushWindowUpdates(StreamId, State).
 
 flushWindowUpdates(StreamId, State0) ->
    Streams = maps:get(streams, State0),
