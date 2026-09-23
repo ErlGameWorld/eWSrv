@@ -189,6 +189,23 @@ malformedResponseHeaders() ->
       gen_tcp:close(Sock)
    end).
 
+informational_handler_status_becomes_500_test_() ->
+   {timeout, 10, fun informationalHandlerStatus/0}.
+
+informationalHandlerStatus() ->
+   withServer(fun(Port) ->
+      {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
+         [binary, {packet, raw}, {active, false}], 2000),
+      ok = gen_tcp:send(Sock, [
+         <<"GET /informational-final HTTP/1.1\r\n">>,
+         <<"Host: 127.0.0.1\r\nConnection: close\r\n\r\n">>
+      ]),
+      {ok, Bin} = recvAll(Sock, <<>>, 3000),
+      {500, _Headers, <<"Internal server error">>, <<>>} = takeResponse(Bin),
+      ?assertEqual(nomatch, binary:match(Bin, <<"103 Early Hints">>)),
+      gen_tcp:close(Sock)
+   end).
+
 invalid_handler_status_becomes_500_test_() ->
    {timeout, 10, fun invalidHandlerStatus/0}.
 
