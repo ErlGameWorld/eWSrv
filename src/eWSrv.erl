@@ -23,6 +23,7 @@
    , args/1
    , mapargs/1
    , headers/1
+   , trailers/1
    , body/1
 ]).
 
@@ -145,4 +146,5 @@ socket(#wsReq{socket = Socket}) -> Socket.
 args(#wsReq{args = Args}) -> Args.
 mapargs(#wsReq{args = Args}) -> maps:from_list(Args).
 headers(#wsReq{headers = Headers}) -> Headers.
+trailers(#wsReq{trailers = Trailers}) -> Trailers.
 body(#wsReq{body = Body}) -> Body.
