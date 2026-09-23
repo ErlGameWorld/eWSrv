@@ -231,12 +231,18 @@ finishHeaders(Rest, Socket,
             undefined ->
                {wsDone, State#wsState{buffer = Rest, wsReq = WsReq, temHeader = TemHeader}};
             _ ->
-               wsHttp:maybeSendContinue(Socket, TemHeader),
-               NState = State#wsState{stage = wsBody, buffer = <<>>, wsReq = WsReq,
-                  temHeader = TemHeader, bodyAcc = [], bodySize = 0},
-               case Rest of
-                  <<>> -> {ok, NState};
-                  _ -> request(wsBody, Rest, Socket, NState)
+               case wsHttp:maybeSendContinue(Socket, TemHeader) of
+                  {error, unsupported_expectation} ->
+                     {err_code, 417};
+                  {error, Reason} ->
+                     {error, {continue_send_failed, Reason}};
+                  _ ->
+                     NState = State#wsState{stage = wsBody, buffer = <<>>, wsReq = WsReq,
+                        temHeader = TemHeader, bodyAcc = [], bodySize = 0},
+                     case Rest of
+                        <<>> -> {ok, NState};
+                        _ -> request(wsBody, Rest, Socket, NState)
+                     end
                end
          end
    end.
