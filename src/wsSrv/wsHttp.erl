@@ -1077,11 +1077,11 @@ maybeSendContinue(Socket, Headers) ->
       undefined ->
          ok;
       Value ->
-         case wsUtil:headerNameEq(iolist_to_binary(Value), <<"100-continue">>) of
+         case wsUtil:headerNameEq(string:trim(iolist_to_binary(Value)), <<"100-continue">>) of
             true ->
                wsNet:send(Socket, httpResponse(100));
             false ->
-               ok
+               {error, unsupported_expectation}
          end
    end.
 
