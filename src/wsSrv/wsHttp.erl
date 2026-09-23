@@ -34,7 +34,10 @@
 newConn(Sock, ConnArgs) ->
    case element(1, ConnArgs) of
       undefined ->
-         ?MODULE:start_link(ConnArgs);
+         %% 无外部 supervisor 时也必须走 start_link/2。旧路径丢掉 Sock，
+         %% 同时跳过 WsMod:init/1 并关闭 behavior 消息分发，导致默认配置
+         %% 与配置 wsSupName 时的回调语义不一致。
+         ?MODULE:start_link(Sock, ConnArgs);
       WsSupName ->
          supervisor:start_child(WsSupName, [Sock, ConnArgs])
    end.
@@ -616,19 +619,26 @@ doHandle(State) ->
       %% WebSocket升级
       {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, Headers);
       %% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
-      {HttpCode, Headers, {file, Filename}} ->
+      {HttpCode, Headers, {file, Filename}}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, []};
-      {HttpCode, Headers, {file, Filename, Range}} ->
+      {HttpCode, Headers, {file, Filename, Range}}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, Range};
       %% Simple
-      {HttpCode, Headers, Body} -> {response, HttpCode, Headers, Body};
-      {HttpCode, Body} -> {response, HttpCode, [], Body};
+      {HttpCode, Headers, Body}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         {response, HttpCode, Headers, Body};
+      {HttpCode, Body}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         {response, HttpCode, [], Body};
       %% Unexpected
       Unexpected ->
          ?wsErr("handle return error WsReq:~p Ret:~p~n", [WsReq, Unexpected]),
          {response, 500, [], <<"Internal server error">>}
    catch
-      throw:{ResponseCode, Headers, Body} when is_integer(ResponseCode) ->
+      throw:{ResponseCode, Headers, Body}
+         when is_integer(ResponseCode), ResponseCode >= 100, ResponseCode =< 999 ->
          {response, ResponseCode, Headers, Body};
       throw:Exc:Stacktrace ->
          ?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
@@ -650,37 +660,53 @@ doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Ver
    NHeaders = normalizeContentLength(Code, Method, iolist_size(SBody), UserHeaders),
    Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
    Headers = addConnectionHeader(NHeaders, Policy, Version),
-   sendResponse(Socket, Method, Code, Headers, SBody),
-   Policy;
+   case sendResponse(Socket, Method, Code, Headers, SBody) of
+      ok -> Policy;
+      _ -> close
+   end;
 doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) ->
-   UserHeaders = deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0)),
+   %% chunk framing由框架生成，因此Content-Length和业务层自带的
+   %% Transfer-Encoding都必须移除，避免线路格式与响应头声明不一致。
+   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
+      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
    Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
-   ResponseHeaders = addConnectionHeader([transferEncoding(UserHeaders) | UserHeaders], Policy, Version),
-   sendResponse(Socket, Method, 200, ResponseHeaders, <<>>),
-   case Method of
-      'HEAD' ->
-         Policy;
-      _ ->
-         %% 客户端在流式响应过程中断开时必须结束连接进程。
-         %% 之前把 chunk loop 的结果丢掉、总是返回 keep-alive，进程会泄漏。
-         Sent = (Initial =:= <<>> orelse Initial =:= <<"">>) orelse sendChunk(Socket, Initial),
-         case Sent of
-            {error, _} ->
-               close;
+   ResponseHeaders = addConnectionHeader(
+      [{<<"Transfer-Encoding">>, <<"chunked">>} | UserHeaders], Policy, Version),
+   case sendResponse(Socket, Method, 200, ResponseHeaders, <<>>) of
+      ok ->
+         case Method of
+            'HEAD' ->
+               Policy;
             _ ->
-               case startChunkLoop(Socket) of
-                  ok -> Policy;
-                  {error, _} -> close
+               %% 客户端在流式响应过程中断开时必须结束连接进程。
+               %% 之前把 chunk loop 的结果丢掉、总是返回 keep-alive，进程会泄漏。
+               %% sendChunk/2 本身正确处理空 iolist；不要用 orelse 连接其
+               %% ok/{error,_} 返回值，否则非空 Initial 会触发 badarg。
+               Sent = sendChunk(Socket, Initial),
+               case Sent of
+                  {error, _} ->
+                     close;
+                  _ ->
+                     case startChunkLoop(Socket) of
+                        ok -> Policy;
+                        {error, _} -> close
+                     end
                end
-         end
+         end;
+      _ ->
+         close
    end;
 %% WebSocket升级响应
 doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version) ->
-   sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>),
-   keep_ws;
+   case sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>) of
+      ok -> keep_ws;
+      _ -> close
+   end;
 doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version) ->
    Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
-   UserHeaders = deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0)),
+   %% 文件响应由框架确定长度/Range，不能保留业务层自带TE或CL。
+   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
+      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
    ResponseHeaders = addConnectionHeader(UserHeaders, Policy, Version),
    case wsUtil:fileSize(Filename) of
       {error, _FileError} ->
@@ -705,8 +731,7 @@ doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeade
                invalid_range ->
                   ERange = wsUtil:encodeRange(invalid_range, Size),
                   sendResponse(Socket, Method, 416,
-                     [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>),
-                  ok
+                     [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>)
             end,
          case Ret of
             ok -> Policy;
@@ -745,12 +770,20 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
       end,
 
    Response = httpResponse(Code, Headers, Body),
-   case wsNet:send(Socket, Response) of
-      ok ->
-         ok;
-      _Err ->
-         ?wsErr("send_response error ~p~n", [_Err])
-   end.
+	wsNet:send(Socket, Response).
+   %%case wsNet:send(Socket, Response) of
+   %%   ok ->
+   %%      ok;
+   %%   {error, Reason} when Reason =:= closed; Reason =:= econnreset; Reason =:= epipe; Reason =:= einval ->
+   %%      %% 对端在响应写完之前就断开：压测(如 wrk)收尾、浏览器提前导航、客户端主动 close 都会这样。
+   %%      %% 这是正常事件而非服务端故障——连接状态机照常走 close。若按 ERROR 记，
+   %%      %% 真实服务上这类日志会持续累积，把真正的写失败淹掉。
+   %%      ?wsWarn("send_response skipped, peer gone: ~p~n", [Reason]),
+   %%      {error, Reason};
+   %%   _Err ->
+   %%       ?wsErr("send_response error ~p~n", [_Err]),
+   %%      _Err
+   %%end.
 
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
@@ -760,7 +793,7 @@ tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
       true ->
          {Body, UserHeaders};
       false ->
-         case lists:keyfind(<<"Content-Encoding">>, 1, UserHeaders) of
+         case findHeader(<<"Content-Encoding">>, UserHeaders) of
             false ->
                case chooseContentEncoding(ReqHeaders) of
                   none ->
@@ -778,7 +811,7 @@ tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
    end.
 
 chooseContentEncoding(ReqHeaders) ->
-   case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
+   case findHeader(<<"Accept-Encoding">>, ReqHeaders) of
       false ->
          none;
       {_, Value} ->
@@ -836,14 +869,16 @@ encodingQ(Name, Encodings) ->
    end.
 
 addVary(Hs) ->
-   case lists:keyfind(<<"Vary">>, 1, Hs) of
+   case findHeader(<<"Vary">>, Hs) of
       false ->
          [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
-      {_, Value} ->
-         Tokens = [string:trim(T) || T <- binary:split(iolist_to_binary(Value), <<",">>, [global])],
-         case lists:member(<<"Accept-Encoding">>, Tokens) of
+      {Key, Value} ->
+         case lists:any(
+            fun(T) -> wsUtil:headerNameEq(string:trim(T), <<"Accept-Encoding">>) end,
+            binary:split(iolist_to_binary(Value), <<",">>, [global])
+         ) of
             true -> Hs;
-            false -> lists:keyreplace(<<"Vary">>, 1, Hs, {<<"Vary">>, [Value, <<", Accept-Encoding">>]})
+            false -> lists:keyreplace(Key, 1, Hs, {Key, [Value, <<", Accept-Encoding">>]})
          end
    end.
 
@@ -869,14 +904,15 @@ doSendFile(Fd, {Offset, Length}, Socket, Headers) ->
    try wsNet:send(Socket, Headers) of
       ok ->
          case wsNet:sendfile(Fd, Socket, Offset, Length, []) of
-            {ok, _BytesSent} -> ok;
-            {error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
-               ?wsErr("send file error"),
-               LErr
+            {ok, _BytesSent} ->
+               ok;
+            {error, Reason} = Error ->
+               ?wsErr("send file error ~p", [Reason]),
+               Error
          end;
-      {error, Closed} = LErr when Closed =:= closed orelse Closed =:= enotconn ->
-         ?wsErr("send file error"),
-         LErr
+      {error, Reason} = Error ->
+         ?wsErr("send file header error ~p", [Reason]),
+         Error
    after
       file:close(Fd)
    end.
@@ -925,7 +961,7 @@ chunkLoop(Socket) ->
          case wsNet:send(Socket, <<"0\r\n\r\n">>) of
             ok ->
                ok;
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
+            {error, _Reason} ->
                {error, client_closed}
          end;
       {chunk, close, From} ->
@@ -933,21 +969,24 @@ chunkLoop(Socket) ->
             ok ->
                From ! {self(), ok},
                ok;
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
+            {error, _Reason} ->
                From ! {self(), {error, closed}},
-               ok
+               {error, client_closed}
          end;
       {chunk, Data} ->
-         sendChunk(Socket, Data),
-         ?MODULE:chunkLoop(Socket);
+         case sendChunk(Socket, Data) of
+            ok -> ?MODULE:chunkLoop(Socket);
+            {error, _} -> {error, client_closed}
+         end;
       {chunk, Data, From} ->
          case sendChunk(Socket, Data) of
             ok ->
-               From ! {self(), ok};
-            {error, Closed} when Closed =:= closed orelse Closed =:= enotconn ->
-               From ! {self(), {error, closed}}
-         end,
-         ?MODULE:chunkLoop(Socket)
+               From ! {self(), ok},
+               ?MODULE:chunkLoop(Socket);
+            {error, _} ->
+               From ! {self(), {error, closed}},
+               {error, client_closed}
+         end
    end.
 
 sendChunk(Socket, Data) ->
@@ -964,18 +1003,18 @@ maybeSendContinue(Socket, Headers) ->
       undefined ->
          ok;
       Value ->
-         case wsUtil:toLowerStr(iolist_to_binary(Value)) of
-            <<"100-continue">> ->
+         case wsUtil:headerNameEq(iolist_to_binary(Value), <<"100-continue">>) of
+            true ->
                wsNet:send(Socket, httpResponse(100));
-            _ ->
+            false ->
                ok
          end
    end.
 
 getExpect(Headers) ->
-   case wsUtil:getHeader('Expect', Headers, undefined) of
-      undefined -> wsUtil:getHeader(<<"Expect">>, Headers, undefined);
-      Value -> Value
+   case findHeader(<<"Expect">>, Headers) of
+      false -> undefined;
+      {_, Value} -> Value
    end.
 
 httpResponse(Code) ->
@@ -988,18 +1027,85 @@ httpResponse(Code, Headers, Body) ->
    [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
 
 spellHeaders(Headers) ->
-   [[toBinStr(Key), <<": ">>, toBinStr(Value), <<"\r\n">>]
-      || {Key, Value} <- Headers, Key =/= <<>>, Key =/= ''] .
+   [[Name, <<": ">>, Value, <<"\r\n">>]
+      || Header <- Headers,
+         {ok, Name, Value} <- [wireHeader(Header)]].
+
+%% 热路径：handler / 框架给出的头几乎全是 binary，走无 try 的快路径。
+wireHeader({Name, Value}) when is_binary(Name), is_binary(Value), Name =/= <<>> ->
+   case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+      true -> {ok, Name, Value};
+      false ->
+         ?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+         invalid
+   end;
+wireHeader({Key0, Value0}) when Key0 =/= <<>>, Key0 =/= '' ->
+   try
+      Name = toBinStr(Key0),
+      Value = toBinStr(Value0),
+      case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+         true -> {ok, Name, Value};
+         false ->
+            ?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+            invalid
+      end
+   catch
+      _:_ -> invalid
+   end;
+wireHeader(_) ->
+   invalid.
+
+validH1HeaderName(<<>>) ->
+   false;
+validH1HeaderName(Bin) ->
+   validH1HeaderNameChars(Bin).
+
+%% guard 逐字节判 token 实测比查表快，保持不动。
+validH1HeaderNameChars(<<>>) ->
+   true;
+validH1HeaderNameChars(<<C, Rest/binary>>) when
+   (C >= 65 andalso C =< 90) orelse
+   (C >= 97 andalso C =< 122) orelse
+   (C >= 48 andalso C =< 57) orelse
+   C =:= 33 orelse C =:= 35 orelse C =:= 36 orelse C =:= 37 orelse
+   C =:= 38 orelse C =:= 39 orelse C =:= 42 orelse C =:= 43 orelse
+   C =:= 45 orelse C =:= 46 orelse C =:= 94 orelse C =:= 95 orelse
+   C =:= 96 orelse C =:= 124 orelse C =:= 126 ->
+   validH1HeaderNameChars(Rest);
+validH1HeaderNameChars(_) ->
+   false.
+
+validH1HeaderValue(Value) ->
+   wsUtil:noCtlChars(Value).
 
 %% 响应头键统一成 binary，便于后续 keydelete / keyfind。
 normalizeH1Headers(Headers) ->
    [{toBinStr(Key), Value} || {Key, Value} <- Headers].
 
-deleteHeader(Name, Headers) when is_binary(Name) ->
+%% header 名按 RFC 7230 大小写不敏感。旧实现每次 toLowerStr 分配临时 binary，
+%% 响应热路径上每请求十余次查找，吃掉约 15~20% 吞吐。
+%% 现在：先 lists:keyfind（BIF，规范大小写时直接命中），未命中再零分配 CI 比较。
+deleteHeader(Name, Headers) ->
    lists:filter(fun
-      ({Key, _}) -> toBinStr(Key) =/= Name;
+      ({Key, _}) -> not wsUtil:headerNameEq(Key, Name);
       (_) -> true
    end, Headers).
+
+findHeader(Name, Headers) ->
+   case lists:keyfind(Name, 1, Headers) of
+      {_, _} = Found -> Found;
+      false -> findHeaderCi(Name, Headers)
+   end.
+
+findHeaderCi(_Name, []) ->
+   false;
+findHeaderCi(Name, [{Key, Value} | Rest]) ->
+   case wsUtil:headerNameEq(Key, Name) of
+      true -> {Key, Value};
+      false -> findHeaderCi(Name, Rest)
+   end;
+findHeaderCi(Name, [_ | Rest]) ->
+   findHeaderCi(Name, Rest).
 
 -spec splitArgs(binary()) -> list({binary(), binary() | true}).
 splitArgs(<<>>) -> [];
@@ -1016,21 +1122,23 @@ toBinStr(V) when is_atom(V) -> atom_to_binary(V).
 closeOrKeepAlive(UserHeaders, ReqHeader) ->
    connectionPolicy(UserHeaders, ReqHeader, {1, 1}).
 
+%% HTTP/1.1 下 keep-alive 是默认，不必再解析 Connection: keep-alive。
 connectionPolicy(UserHeaders, ReqHeaders, Version) ->
-   RespClose = headerHasToken(<<"Connection">>, UserHeaders, <<"close">>),
-   ReqClose = headerHasToken('Connection', ReqHeaders, <<"close">>),
-   ReqKeep = headerHasToken('Connection', ReqHeaders, <<"keep-alive">>),
-   case RespClose orelse ReqClose of
+   case headerHasToken(<<"Connection">>, UserHeaders, <<"close">>)
+        orelse headerHasToken('Connection', ReqHeaders, <<"close">>) of
       true ->
          close;
       false when Version =:= {1, 0} ->
-         case ReqKeep of true -> keep_alive; false -> close end;
+         case headerHasToken('Connection', ReqHeaders, <<"keep-alive">>) of
+            true -> keep_alive;
+            false -> close
+         end;
       false ->
          keep_alive
    end.
 
 addConnectionHeader(Headers0, Policy, Version) ->
-   Headers = lists:keydelete(<<"Connection">>, 1, Headers0),
+   Headers = deleteHeader(<<"Connection">>, Headers0),
    case {Policy, Version} of
       {close, _} -> [{<<"Connection">>, <<"close">>} | Headers];
       {keep_alive, {1, 0}} -> [{<<"Connection">>, <<"Keep-Alive">>} | Headers];
@@ -1038,20 +1146,12 @@ addConnectionHeader(Headers0, Policy, Version) ->
    end.
 
 headerHasToken(Name, Headers, Wanted) ->
-   case lists:keyfind(Name, 1, Headers) of
+   case findHeader(Name, Headers) of
       false -> false;
       {_, Value} ->
-         Lower = wsUtil:toLowerStr(iolist_to_binary(Value)),
-         Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
-         lists:member(Wanted, Tokens)
-   end.
-
-transferEncoding(Headers) ->
-   case lists:keyfind(<<"Transfer-Encoding">>, 1, Headers) of
-      false ->
-         {<<"Transfer-Encoding">>, <<"chunked">>};
-      _ ->
-         []
+         %% 不整串 toLowerStr：按逗号切开后对每个 token 做零分配 CI 比较。
+         Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
+         lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), Wanted) end, Tokens)
    end.
 
 %% HTTP STATUS CODES
@@ -1119,5 +1219,4 @@ status(508) -> <<"508 Loop Detected">>;
 status(510) -> <<"510 Not Extended">>;
 status(511) -> <<"511 Network Authentication Required">>;
 status(I) when is_integer(I), I >= 100, I < 1000 ->
-   <<(integer_to_binary(I))/binary, " Unknown">>;
-status(B) when is_binary(B) -> B.
+   <<(integer_to_binary(I))/binary, " Unknown">>.

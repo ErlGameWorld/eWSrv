@@ -28,7 +28,8 @@ request(reqLine, Data0, Socket, State) ->
                {err_code, 414};
             false ->
                case parsePath(RawPath) of
-                  {ok, Scheme, Host, Port, Path, URLArgs} ->
+                  {ok, Scheme0, Host, Port, Path, URLArgs} ->
+                     Scheme = requestScheme(Scheme0, State),
                      WsReq = #wsReq{
                         method = Method, path = Path, version = Version,
                         scheme = Scheme, host = Host, port = Port,
@@ -173,7 +174,7 @@ parseTransferEncoding(Value, Rest, Socket, #wsState{contentLength = Current, chu
 parseHost(_Value, _Rest, _Socket, #wsState{hostHeaderSeen = true}) ->
    {error, duplicate_host};
 parseHost(Value, Rest, Socket, #wsState{wsReq = WsReq} = State) ->
-   case parseHostHeader(Value) of
+   case parseHostHeader(Value, defaultPort(WsReq#wsReq.scheme)) of
       {Host, Port} ->
          NewWsReq =
             case WsReq#wsReq.host of
@@ -281,8 +282,7 @@ parseChunkedState(Data, #wsState{chunkState = crlf} = State) ->
          {error, invalid_chunk_terminator}
    end;
 
-parseChunkedState(Data, #wsState{chunkState = trailers,
-   maxHeaderSize = MaxHeaderSize, wsReq = WsReq, bodyAcc = Acc} = State) ->
+parseChunkedState(Data, #wsState{chunkState = trailers, maxHeaderSize = MaxHeaderSize, wsReq = WsReq, bodyAcc = Acc} = State) ->
    case Data of
       <<"\r\n", Rest/binary>> ->
          Body = finishBody(Acc),
@@ -311,12 +311,22 @@ finishBody(Acc) ->
    iolist_to_binary(lists:reverse(Acc)).
 
 parseNonNegativeInteger(Value) when is_binary(Value) ->
-   try
-      N = binary_to_integer(string:trim(Value)),
-      case N >= 0 of true -> {ok, N}; false -> error end
-   catch
-      _:_ -> error
+   Bin = string:trim(Value),
+   %% Content-Length = 1*DIGIT。binary_to_integer/1 也接受 +1/-1，
+   %% 不能直接拿它当语法校验，否则不同 HTTP 实现可能产生 framing 分歧。
+   case Bin =/= <<>> andalso byte_size(Bin) =< 20 andalso allDecimalDigits(Bin) of
+      true ->
+         try {ok, binary_to_integer(Bin)} catch _:_ -> error end;
+      false ->
+         error
    end.
+
+allDecimalDigits(<<>>) ->
+   true;
+allDecimalDigits(<<C, Rest/binary>>) when C >= $0, C =< $9 ->
+   allDecimalDigits(Rest);
+allDecimalDigits(_) ->
+   false.
 
 exceedsMax(_Length, infinity) ->
    false;
@@ -329,10 +339,12 @@ wouldExceed(Current, Add, Max) ->
    Current + Add > Max.
 
 validChunkedEncoding(Value) ->
-   Lower = wsUtil:toLowerStr(iolist_to_binary(Value)),
-   Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
+   Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
    %% eWSrv currently implements only the chunked transfer coding.
-   Tokens =:= [<<"chunked">>].
+   case Tokens of
+      [T] -> wsUtil:headerNameEq(string:trim(T), <<"chunked">>);
+      _ -> false
+   end.
 
 parseChunkSize(Line0) ->
    Line = string:trim(Line0),
@@ -348,14 +360,22 @@ parseChunkSize(Line0) ->
          end
    end.
 
+requestScheme(undefined, #wsState{isSsl = true}) -> <<"https">>;
+requestScheme(undefined, _State) -> <<"http">>;
+requestScheme(Scheme, _State) -> Scheme.
+
+defaultPort(<<"https">>) -> 443;
+defaultPort(https) -> 443;
+defaultPort(_) -> 80.
+
 %% 解析Host头，支持 hostname、hostname:port、[IPv6]、[IPv6]:port。
-parseHostHeader(<<"[", Rest/binary>>) ->
+parseHostHeader(<<"[", Rest/binary>>, DefaultPort) ->
    case binary:match(Rest, <<"]">>) of
       nomatch -> error;
       {Pos, 1} ->
          <<Host:Pos/binary, "]", Tail/binary>> = Rest,
          case Tail of
-            <<>> -> {Host, 80};
+            <<>> -> {Host, DefaultPort};
             <<":", PortBin/binary>> ->
                case parsePort(PortBin) of
                   {ok, Port} -> {Host, Port};
@@ -364,10 +384,10 @@ parseHostHeader(<<"[", Rest/binary>>) ->
             _ -> error
          end
    end;
-parseHostHeader(HostHeader) when is_binary(HostHeader) ->
+parseHostHeader(HostHeader, DefaultPort) when is_binary(HostHeader) ->
    case binary:split(HostHeader, <<":">>, [global]) of
       [Host] when Host =/= <<>> ->
-         {Host, 80};
+         {Host, DefaultPort};
       [Host, PortBin] when Host =/= <<>> ->
          case parsePort(PortBin) of
             {ok, Port} -> {Host, Port};
@@ -376,7 +396,7 @@ parseHostHeader(HostHeader) when is_binary(HostHeader) ->
       _ ->
          error
    end;
-parseHostHeader(_) ->
+parseHostHeader(_, _DefaultPort) ->
    error.
 
 parsePort(Bin) ->

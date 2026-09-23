@@ -13,6 +13,10 @@
    , fileSize/1
    , sendfile/5
    , toLowerStr/1
+   , ensureLower/1
+   , isLowerAscii/1
+   , headerNameEq/2
+   , noCtlChars/1
 ]).
 
 -export_type([range/0]).
@@ -54,6 +58,50 @@ toLowerStr(ListStr) when is_list(ListStr) ->
          end
       end || C <- ListStr
    ].
+
+%% 已是小写的 binary 原样返回（零分配）；否则才走 toLowerStr。
+ensureLower(Bin) when is_binary(Bin) ->
+   case isLowerAscii(Bin) of
+      true -> Bin;
+      false -> toLowerStr(Bin)
+   end.
+
+%% 是否全为非大写 ASCII（用于 H2 强制小写头名检查，替代 Name =:= toLowerStr(Name)）。
+isLowerAscii(<<>>) ->
+   true;
+isLowerAscii(<<C, _/binary>>) when C >= $A, C =< $Z ->
+   false;
+isLowerAscii(<<_, Rest/binary>>) ->
+   isLowerAscii(Rest).
+
+%% 大小写不敏感的 header 名比较，零分配：长度不等立即返回，
+%% 否则逐字节比较并就地折叠大小写。
+headerNameEq(A0, B0) ->
+   A = toBin(A0),
+   B = toBin(B0),
+   byte_size(A) =:= byte_size(B) andalso headerNameEq_(A, B).
+
+headerNameEq_(<<>>, <<>>) ->
+   true;
+headerNameEq_(<<A, RA/binary>>, <<B, RB/binary>>) ->
+   downcaseChar(A) =:= downcaseChar(B) andalso headerNameEq_(RA, RB).
+
+downcaseChar(C) when C >= $A, C =< $Z -> C + 32;
+downcaseChar(C) -> C.
+
+toBin(V) when is_binary(V) -> V;
+toBin(V) when is_atom(V) -> atom_to_binary(V, utf8);
+toBin(V) when is_integer(V) -> integer_to_binary(V);
+toBin(V) when is_list(V) -> iolist_to_binary(V).
+
+%% 字段值禁止 CR / LF / NUL（防响应拆分）。单遍扫描比连续三次
+%% binary:match/2 快约 8 倍，H1/H2 校验共用。
+noCtlChars(<<>>) ->
+   true;
+noCtlChars(<<C, _/binary>>) when C =:= $\r; C =:= $\n; C =:= 0 ->
+   false;
+noCtlChars(<<_, Rest/binary>>) ->
+   noCtlChars(Rest).
 
 -spec mergeOpts(Defaults :: list(), Options :: list()) -> list().
 mergeOpts(Defaults, Options) ->

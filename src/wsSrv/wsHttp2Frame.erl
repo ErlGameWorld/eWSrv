@@ -328,7 +328,7 @@ feedLoop(P, Bin, Acc) ->
 %% GOAWAY 负载：R(1) + Last-Stream-ID(31) + Error Code(32) + 可选调试数据。
 %% @returns `{ok, LastStreamId, ErrorCode, DebugData}'
 -spec goawayFields(binary()) -> {ok, non_neg_integer(), atom() | integer(), binary()} | {error, term()}.
-goawayFields(<<0:1, LastStreamId:31, Code:32, Debug/binary>>) ->
+goawayFields(<<_:1, LastStreamId:31, Code:32, Debug/binary>>) ->
    {ok, LastStreamId, errorCodeAtom(Code), Debug};
 goawayFields(_) -> {error, badGoaway}.
 

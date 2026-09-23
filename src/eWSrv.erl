@@ -59,11 +59,11 @@ openSrv(Port, WsOpts) ->
    WSrvName = wSrvName(Port),
    case ?wsGLV(sslOpts, WsOpts, false) of
       false ->
-         {ok, _} = eNet:openTcp(WSrvName, Port, LWsOpts);
+         eNet:openTcp(WSrvName, Port, LWsOpts);
       SslOpts ->
          HSslOpts = http2SslOpts(Http2, SslOpts),
          SrvOpts = lists:keystore(sslOpts, 1, LWsOpts, {sslOpts, HSslOpts}),
-         {ok, _} = eNet:openSsl(WSrvName, Port, SrvOpts)
+         eNet:openSsl(WSrvName, Port, SrvOpts)
    end.
 
 openSrv(WSrvName, Port, WsOpts) ->
@@ -88,11 +88,11 @@ openSrv(WSrvName, Port, WsOpts) ->
 
    case ?wsGLV(sslOpts, WsOpts, false) of
       false ->
-         {ok, _} = eNet:openTcp(WSrvName, Port, LWsOpts);
+         eNet:openTcp(WSrvName, Port, LWsOpts);
       SslOpts ->
          HSslOpts = http2SslOpts(Http2, SslOpts),
          SrvOpts = lists:keystore(sslOpts, 1, LWsOpts, {sslOpts, HSslOpts}),
-         {ok, _} = eNet:openSsl(WSrvName, Port, SrvOpts)
+         eNet:openSsl(WSrvName, Port, SrvOpts)
    end.
 
 http2SslOpts(false, SslOpts) ->

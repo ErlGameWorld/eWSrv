@@ -147,18 +147,22 @@ takeMaskAndLen(PayloadLength, Rest, Data, Fin, Opcode, _State) ->
 unmaskData(<<>>, _Mask) -> <<>>;
 unmaskData(Data, <<M0:8, M1:8, M2:8, M3:8>>) ->
    M32 = (M0 bsl 24) bor (M1 bsl 16) bor (M2 bsl 8) bor M3,
-   unmaskWords(Data, M32, M0, M1, M2, M3, <<>>).
+   %% 不能在每个 32-bit word 上做 <<Acc/binary,...>>：大帧会退化成 O(n²)
+   %% 拷贝。反向累计小 binary，收尾只拼接一次。
+   unmaskWords(Data, M32, M0, M1, M2, M3, []).
 
 unmaskWords(<<W:32, Rest/binary>>, M32, M0, M1, M2, M3, Acc) ->
-   unmaskWords(Rest, M32, M0, M1, M2, M3, <<Acc/binary, (W bxor M32):32>>);
+   unmaskWords(Rest, M32, M0, M1, M2, M3, [<<(W bxor M32):32>> | Acc]);
 unmaskWords(<<A:8, B:8, C:8>>, _M32, M0, M1, M2, _M3, Acc) ->
-   <<Acc/binary, (A bxor M0):8, (B bxor M1):8, (C bxor M2):8>>;
+   iolist_to_binary(lists:reverse([
+      <<(A bxor M0):8, (B bxor M1):8, (C bxor M2):8>> | Acc
+   ]));
 unmaskWords(<<A:8, B:8>>, _M32, M0, M1, _M2, _M3, Acc) ->
-   <<Acc/binary, (A bxor M0):8, (B bxor M1):8>>;
+   iolist_to_binary(lists:reverse([<<(A bxor M0):8, (B bxor M1):8>> | Acc]));
 unmaskWords(<<A:8>>, _M32, M0, _M1, _M2, _M3, Acc) ->
-   <<Acc/binary, (A bxor M0):8>>;
+   iolist_to_binary(lists:reverse([<<(A bxor M0):8>> | Acc]));
 unmaskWords(<<>>, _M32, _M0, _M1, _M2, _M3, Acc) ->
-   Acc.
+   iolist_to_binary(lists:reverse(Acc)).
 
 %% ================================================================================================
 %% Frame processing / fragmentation
@@ -296,11 +300,9 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
             {ok, NWebState} ->
                {ok, NWebState};
             {ok, RetBody, NWebState} ->
-               _ = sendFrame(Socket, ?WsOpBinary, RetBody),
-               {ok, NWebState};
+               sendHandlerFrame(Socket, ?WsOpBinary, RetBody, NWebState);
             {ok, ROpCode, RetBody, NWebState} ->
-               _ = sendFrame(Socket, ROpCode, RetBody),
-               {ok, NWebState};
+               sendHandlerFrame(Socket, ROpCode, RetBody, NWebState);
             {close, NWebState} ->
                {close, normal, NWebState};
             {close, Reason, NWebState} ->
@@ -313,8 +315,7 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
                {ok, WebState}
          catch
             throw:{ROpCode, RetBody, NWebState} when is_integer(ROpCode) ->
-               _ = sendFrame(Socket, ROpCode, RetBody),
-               {ok, NWebState};
+               sendHandlerFrame(Socket, ROpCode, RetBody, NWebState);
             throw:{ok, NWebState} ->
                {ok, NWebState};
             throw:{close, NWebState} ->
@@ -330,8 +331,38 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
          end
    end.
 
+sendHandlerFrame(Socket, Opcode, Payload, WebState) ->
+   case sendFrame(Socket, Opcode, Payload) of
+      ok -> {ok, WebState};
+      {error, Reason} -> {close, {send_frame, Reason}, WebState}
+   end.
+
 sendFrame(Socket, Opcode, Payload0) ->
-   wsNet:send(Socket, encodeFrame(Opcode, Payload0)).
+   Payload = iolist_to_binary(Payload0),
+   case validateOutboundFrame(Opcode, Payload) of
+      ok -> wsNet:send(Socket, encodeFrame(Opcode, Payload));
+      {error, _} = Error -> Error
+   end.
+
+validateOutboundFrame(?WsOpText, Payload) ->
+   validateUtf8(Payload);
+validateOutboundFrame(?WsOpBinary, _Payload) ->
+   ok;
+validateOutboundFrame(?WsOpCF, _Payload) ->
+   %% Low-level continuation replies remain supported; outbound fragmentation
+   %% state is owned by callers of encodeFrame/2.
+   ok;
+validateOutboundFrame(?WsOpClose, Payload) when byte_size(Payload) =< 125 ->
+   validateClosePayload(Payload);
+validateOutboundFrame(?WsOpPing, Payload) when byte_size(Payload) =< 125 ->
+   ok;
+validateOutboundFrame(?WsOpPong, Payload) when byte_size(Payload) =< 125 ->
+   ok;
+validateOutboundFrame(Opcode, _Payload)
+   when Opcode =:= ?WsOpClose; Opcode =:= ?WsOpPing; Opcode =:= ?WsOpPong ->
+   {error, control_frame_too_large};
+validateOutboundFrame(_Opcode, _Payload) ->
+   {error, invalid_opcode}.
 
 encodeFrame(Payload) ->
    encodeFrame(?WsOpBinary, Payload).
@@ -397,14 +428,13 @@ validateConditions(Method, HttpVersion, Connection, Upgrade, Version, Key) ->
 isUpgradeConnection(undefined) ->
    false;
 isUpgradeConnection(Connection) ->
-   Lower = wsUtil:toLowerStr(iolist_to_binary(Connection)),
-   Tokens = [string:trim(T) || T <- binary:split(Lower, <<",">>, [global])],
-   lists:member(<<"upgrade">>, Tokens).
+   Tokens = binary:split(iolist_to_binary(Connection), <<",">>, [global]),
+   lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), <<"upgrade">>) end, Tokens).
 
 isWebsocketUpgrade(undefined) ->
    false;
 isWebsocketUpgrade(Upgrade) ->
-   wsUtil:toLowerStr(string:trim(iolist_to_binary(Upgrade))) =:= <<"websocket">>.
+   wsUtil:headerNameEq(string:trim(iolist_to_binary(Upgrade)), <<"websocket">>).
 
 isSupportedVersion(undefined) ->
    false;

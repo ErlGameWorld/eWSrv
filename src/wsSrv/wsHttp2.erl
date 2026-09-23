@@ -28,6 +28,10 @@
 -define(DEFAULT_WINDOW, 65535).
 -define(DEFAULT_MAX_FRAME, 16384).
 -define(DEFAULT_MAX_STREAMS, 100).
+%% 本端广播的 SETTINGS_HEADER_TABLE_SIZE。解码端动态表上限（wsHpack 的 limit）
+%% 必须与它同源：对端只被允许把动态表扩到本端宣布的这个值，两边写死成两个
+%% 数字就会在以后调整时悄悄错开，合法的大小更新会被误判成压缩错误。
+-define(LOCAL_HEADER_TABLE_SIZE, 4096).
 %% 一个头部块里 HEADERS + CONTINUATION 的帧数上限。空 CONTINUATION
 %% 不增加字节计数，没有这个上限就能把片段列表撑到耗尽内存。
 -define(MAX_CONTINUATION_FRAMES, 32).
@@ -51,7 +55,9 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       phase => preface,
       preface_buffer => <<>>,
       parser => wsHttp2Frame:new(),
-      rx_hpack => wsHpack:new(),
+      rx_hpack => wsHpack:new(?LOCAL_HEADER_TABLE_SIZE),
+      %% 编码端起点是协议初值 4096：对端在发来 SETTINGS_HEADER_TABLE_SIZE
+      %% 之前，本端只能按协议默认值编码。
       tx_hpack => wsHpack:new(),
       streams => #{},
       header_frames => none,
@@ -82,7 +88,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
 -spec start(map()) -> {ok, map()} | {error, term()}.
 start(State) ->
    Settings = [
-      {header_table_size, 4096},
+      {header_table_size, ?LOCAL_HEADER_TABLE_SIZE},
       {enable_push, 0},
       {max_concurrent_streams, maps:get(max_concurrent_streams, State)},
       {initial_window_size, maps:get(local_initial_window, State)},
@@ -172,30 +178,10 @@ requireInitialSettings(_Frame, #{need_client_settings := true}) ->
 requireInitialSettings(_Frame, State) ->
    {ok, State}.
 
-validateFrame(Type, Flags, StreamId, Payload) ->
-   %% 有意比 RFC 9113 §4.1 更严：未定义 flag 直接 PROTOCOL_ERROR，
-   %% 而不是忽略。这样能挡住把保留位当扩展通道的客户端。
-   case legalFlags(Type) of
-      undefined -> validateStreamId(Type, StreamId, Payload);
-      Legal ->
-         case Flags band (bnot Legal) of
-            0 -> validateStreamId(Type, StreamId, Payload);
-            _ -> {error, protocol_error, {illegal_flags, Type, Flags}}
-         end
-   end.
-
-legalFlags(data) -> ?END_STREAM bor ?PADDED;
-legalFlags(headers) -> ?END_STREAM bor ?END_HEADERS bor ?PADDED bor ?PRIORITY;
-legalFlags(priority) -> 0;
-legalFlags(rst_stream) -> 0;
-legalFlags(settings) -> ?ACK;
-legalFlags(push_promise) -> ?END_HEADERS bor ?PADDED;
-legalFlags(ping) -> ?ACK;
-legalFlags(goaway) -> 0;
-legalFlags(window_update) -> 0;
-legalFlags(continuation) -> ?END_HEADERS;
-legalFlags({unknown, _}) -> undefined;
-legalFlags(_) -> undefined.
+validateFrame(Type, _Flags, StreamId, Payload) ->
+   %% RFC 9113 §4.1: 未定义/未使用的 flag 位在接收端必须忽略。
+   %% 各 frame 处理函数只读取自己理解的 flag，扩展 flag 不应导致断连。
+   validateStreamId(Type, StreamId, Payload).
 
 validateStreamId(Type, 0, _Payload)
    when Type =:= data; Type =:= headers; Type =:= priority;
@@ -276,10 +262,16 @@ dispatch(priority, _Flags, StreamId, Payload, Rest, State0) ->
 dispatch(push_promise, _Flags, _StreamId, _Payload, _Rest, State) ->
    %% Clients cannot send PUSH_PROMISE.
    connError(protocol_error, client_push_promise, State);
-dispatch(goaway, _Flags, 0, Payload, _Rest, State) ->
+dispatch(goaway, _Flags, 0, Payload, Rest, State) ->
    case wsHttp2Frame:goawayFields(Payload) of
-      {ok, _Last, Code, _Debug} -> {stop, {peer_goaway, Code}, State#{goaway => true}};
-      {error, Reason} -> connError(frame_size_error, Reason, State)
+      {ok, _Last, no_error, _Debug} ->
+         %% GOAWAY(NO_ERROR) 启动优雅关闭：禁止新 stream，但已有 stream
+         %% 仍应完成。立即断开会让已执行的非幂等请求变成结果不确定。
+         applyFrames(Rest, State#{goaway => true});
+      {ok, _Last, Code, _Debug} ->
+         {stop, {peer_goaway, Code}, State#{goaway => true}};
+      {error, Reason} ->
+         connError(frame_size_error, Reason, State)
    end;
 dispatch({unknown, _}, _Flags, _StreamId, _Payload, Rest, State) ->
    applyFrames(Rest, State);
@@ -853,17 +845,6 @@ addStreamRecvCredit(StreamId, Credit, State) ->
 queueConnCredit(FlowBytes, State) ->
    State#{pending_conn_credit => maps:get(pending_conn_credit, State, 0) + FlowBytes}.
 
-queueRecvCredit(StreamId, FlowBytes, State0) ->
-   State1 = queueConnCredit(FlowBytes, State0),
-   Streams = maps:get(streams, State1),
-   case maps:get(StreamId, Streams, undefined) of
-      undefined ->
-         State1;
-      Stream ->
-         Credit = maps:get(pending_recv_credit, Stream, 0) + FlowBytes,
-         State1#{streams => Streams#{StreamId := Stream#{pending_recv_credit => Credit}}}
-   end.
-
 applyRecvCredit(State0) ->
    Conn = maps:get(recv_conn_window, State0) + maps:get(pending_conn_credit, State0, 0),
    Streams = maps:map(fun(_Id, Stream) ->
@@ -1165,13 +1146,17 @@ callHandler(WsMod, Method, Path, Req) ->
       {ok, Headers, {file, Filename, Range}} -> {file, 200, Headers, Filename, Range};
       {ok, Headers, Body} -> {response, 200, Headers, Body};
       {ok, Body} -> {response, 200, [], Body};
-      {HttpCode, Headers, {file, Filename}} when is_integer(HttpCode) ->
+      {HttpCode, Headers, {file, Filename}}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, []};
-      {HttpCode, Headers, {file, Filename, Range}} when is_integer(HttpCode) ->
+      {HttpCode, Headers, {file, Filename, Range}}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, Range};
-      {HttpCode, Headers, Body} when is_integer(HttpCode) ->
+      {HttpCode, Headers, Body}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {response, HttpCode, Headers, Body};
-      {HttpCode, Body} when is_integer(HttpCode) ->
+      {HttpCode, Body}
+         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
          {response, HttpCode, [], Body};
       {chunk, Headers} ->
          {chunk, Headers, <<>>};
@@ -1342,7 +1327,8 @@ responseHeaders(Code, Headers0, BodySize, Method) ->
 normalizeResponseHeaders([], Acc) ->
    lists:reverse(Acc);
 normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
-   Name = wsUtil:toLowerStr(toBinary(Name0)),
+   %% 已是小写的 binary 不分配；handler 常给 <<"content-type">> 这类字面量。
+   Name = wsUtil:ensureLower(toBinary(Name0)),
    Value = toBinary(Value0),
    case {isHopByHop(Name), validMethod(Name), validHeaderValue(Value)} of
       {true, _, _} ->
@@ -1497,7 +1483,8 @@ parseHeaderList([], Pseudo, Regular, _Phase, Seen) ->
 parseHeaderList([{Name0, Value0} | Rest], Pseudo, Regular, Phase, Seen) ->
    Name = toBinary(Name0),
    Value = toBinary(Value0),
-   case Name =:= wsUtil:toLowerStr(Name) of
+   %% 零分配检查小写，替代 Name =:= toLowerStr(Name)（每次分配一份拷贝）。
+   case wsUtil:isLowerAscii(Name) of
       false ->
          {error, uppercase_header_name};
       true ->
@@ -1532,17 +1519,30 @@ allowedRequestPseudo(<<":protocol">>) -> true;
 allowedRequestPseudo(_) -> false.
 
 validRegularHeader(Name, Value) ->
-   case isHopByHop(Name) of
-      true -> false;
-      false when Name =:= <<"te">> ->
-         wsUtil:toLowerStr(string:trim(Value)) =:= <<"trailers">>;
-      false -> validHeaderValue(Value)
+   case validHeaderName(Name) andalso not isHopByHop(Name) of
+      false ->
+         false;
+      true when Name =:= <<"te">> ->
+         %% TE is the one connection-specific exception in HTTP/2.
+         validHeaderValue(Value) andalso
+            wsUtil:headerNameEq(string:trim(Value), <<"trailers">>);
+      true ->
+         validHeaderValue(Value)
    end.
 
+validHeaderName(Name) ->
+   %% field-name = token。parseHeaderList/5 另外强制了小写。
+   validMethod(Name).
+
+validHeaderValue(<<>>) ->
+   true;
 validHeaderValue(Value) ->
-   binary:match(Value, <<"\r">>) =:= nomatch andalso
-   binary:match(Value, <<"\n">>) =:= nomatch andalso
-   binary:match(Value, <<0>>) =:= nomatch.
+   %% RFC 9113 §8.2.1 minimum validation.
+   First = binary:first(Value),
+   Last = binary:last(Value),
+   First =/= 32 andalso First =/= 9 andalso
+   Last =/= 32 andalso Last =/= 9 andalso
+   wsUtil:noCtlChars(Value).
 
 isHopByHop(<<"connection">>) -> true;
 isHopByHop(<<"proxy-connection">>) -> true;
@@ -1674,7 +1674,7 @@ validateAuthority(Authority, Hosts, Scheme) ->
             {AuthValue, undefined} ->
                parseAuthority(AuthValue, Scheme);
             {AuthValue, HostValue} ->
-               case wsUtil:toLowerStr(AuthValue) =:= wsUtil:toLowerStr(HostValue) of
+               case wsUtil:headerNameEq(AuthValue, HostValue) of
                   false -> {error, authority_host_mismatch};
                   true -> parseAuthority(AuthValue, Scheme)
                end
@@ -1683,8 +1683,7 @@ validateAuthority(Authority, Hosts, Scheme) ->
 
 hostsConsistent([]) -> true;
 hostsConsistent([First | Rest]) ->
-   Lower = wsUtil:toLowerStr(First),
-   lists:all(fun(V) -> wsUtil:toLowerStr(V) =:= Lower end, Rest).
+   lists:all(fun(V) -> wsUtil:headerNameEq(V, First) end, Rest).
 
 parseAuthority(undefined, Scheme) ->
    {ok, undefined, defaultPort(Scheme)};
@@ -1730,16 +1729,36 @@ defaultPort(_) -> undefined.
 parseContentLengthHeaders(Headers) ->
    Values = [V || {<<"content-length">>, V} <- Headers],
    case Values of
-      [] -> undefined;
-      [First | Rest] ->
-         try
-            N = binary_to_integer(First),
-            case N >= 0 andalso lists:all(fun(V) -> V =:= First end, Rest) of
-               true -> N;
-               false -> {error, conflicting_content_length}
-            end
-         catch _:_ -> {error, invalid_content_length} end
+      [] ->
+         undefined;
+      _ ->
+         case [parseContentLengthValue(V) || V <- Values] of
+            [N | Rest] when is_integer(N) ->
+               case lists:all(fun(V) -> V =:= N end, Rest) of
+                  true -> N;
+                  false -> {error, conflicting_content_length}
+               end;
+            _ ->
+               {error, invalid_content_length}
+         end
    end.
+
+parseContentLengthValue(Value) when is_binary(Value), Value =/= <<>>, byte_size(Value) =< 20 ->
+   case allDecimalDigits(Value) of
+      true ->
+         try binary_to_integer(Value) catch _:_ -> invalid end;
+      false ->
+         invalid
+   end;
+parseContentLengthValue(_) ->
+   invalid.
+
+allDecimalDigits(<<>>) ->
+   true;
+allDecimalDigits(<<C, Rest/binary>>) when C >= $0, C =< $9 ->
+   allDecimalDigits(Rest);
+allDecimalDigits(_) ->
+   false.
 
 validateTrailerHeaders(Headers) ->
    case lists:any(fun({Name, Value}) ->
@@ -1866,6 +1885,9 @@ terminate(State) ->
    maps:foreach(fun(_StreamId, Stream) ->
       _ = cancelRequestTimer(Stream),
       closeStreamFile(Stream),
+      %% 连接在流控阻塞期间断开时，外部 chunk producer 仍可能在等 ACK。
+      %% 必须先回失败再杀 worker，否则调用方会永久等待。
+      failStreamPendingAck(Stream),
       killStreamWorker(Stream)
    end, maps:get(streams, State, #{})),
    ok.

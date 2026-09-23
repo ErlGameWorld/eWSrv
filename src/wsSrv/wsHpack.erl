@@ -41,7 +41,11 @@
 -record(ctx, {
    dyn = [] :: [{binary(), binary()}],
    size = 0 :: non_neg_integer(),
-   max = ?DefaultMax :: pos_integer(),
+   %% 当前动态表容量。解码端可在每个 header block 开头动态缩小/恢复。
+   max = ?DefaultMax :: non_neg_integer(),
+   %% SETTINGS_HEADER_TABLE_SIZE 给出的协议级上限。与 max 分离，否则对端
+   %% 先把动态表降到 0 后将无法合法恢复到这个上限。
+   limit = ?DefaultMax :: non_neg_integer(),
    %% 编码端专用：对端当前已知的表上限。协议初始值 4096；
    %% setMax 改动上限后，下一个头部块必须先发动态表大小更新
    sentMax = ?DefaultMax :: non_neg_integer(),
@@ -60,7 +64,7 @@
 new() -> new(?DefaultMax).
 
 -spec new(non_neg_integer()) -> ctx().
-new(Max) when is_integer(Max), Max >= 0 -> #ctx{max = Max}.
+new(Max) when is_integer(Max), Max >= 0 -> #ctx{max = Max, limit = Max}.
 
 -spec maxTableSize(ctx()) -> non_neg_integer().
 maxTableSize(#ctx{max = Max}) -> Max.
@@ -70,7 +74,7 @@ maxTableSize(#ctx{max = Max}) -> Max.
 %% 后会做同样的逐出，先于块内任何索引引用，两侧表才能保持一致。
 %% 随后的 encode/2 会在头部块开头发出对应的大小更新指令（RFC 7541 §4.2）。
 -spec setMax(non_neg_integer(), ctx()) -> ctx().
-setMax(Max, Ctx = #ctx{max = Max}) ->
+setMax(Max, Ctx = #ctx{max = Max, limit = Max}) ->
    Ctx;
 setMax(Max, Ctx = #ctx{dyn = Dyn, size = Size, sentMax = Sent, minPending = Min0})
    when is_integer(Max), Max >= 0, Max =< 16#FFFFFFFF ->
@@ -84,7 +88,7 @@ setMax(Max, Ctx = #ctx{dyn = Dyn, size = Size, sentMax = Sent, minPending = Min0
       false ->
          Min0
    end,
-   Ctx#ctx{dyn = Dyn1, size = Size1, max = Max, minPending = Min1}.
+   Ctx#ctx{dyn = Dyn1, size = Size1, max = Max, limit = Max, minPending = Min1}.
 
 %%====================================================================
 %% 编码
@@ -125,7 +129,7 @@ sizeUpdatePrefix(Ctx = #ctx{max = Max, sentMax = Sent, minPending = Min0}) ->
 entry({Name, Value}) -> {lower(Name), toBinary(Value)};
 entry(Name) when is_binary(Name) -> {lower(Name), <<>>}.
 
-lower(Bin) -> wsUtil:toLowerStr(Bin).
+lower(Bin) -> wsUtil:ensureLower(toBinary(Bin)).
 
 toBinary(V) when is_binary(V) -> V;
 toBinary(V) when is_integer(V) -> integer_to_binary(V);
@@ -302,7 +306,7 @@ decodeLoop(Bin, Ctx, Acc, AllowSU) ->
                {error, sizeUpdateNotAtStart};
             true ->
                case takeInteger(5, Rest) of
-                  {ok, NewMax, Rest1} when NewMax =< Ctx#ctx.max ->
+                  {ok, NewMax, Rest1} when NewMax =< Ctx#ctx.limit ->
                      Ctx1 = resize(NewMax, Ctx),
                      %% 开头可连续多个 size update
                      decodeLoop(Rest1, Ctx1, Acc, true);

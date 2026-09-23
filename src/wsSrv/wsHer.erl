@@ -55,4 +55,9 @@
 %% 支持的WebSocket扩展
 -callback supportedExtensions() -> [binary()].
 
--optional_callbacks([init/1, handleCall/3, handleCast/2, handleInfo/2, handleWs/3, supportedProtocols/0, supportedExtensions/0]).
+%% 与引擎侧的实际调用方式对齐：
+%%   init/1、terminate/2、handleWs/3 —— 调用前会先做 function_exported 检查，属可选；
+%%   handleCall/3、handleCast/2、handleInfo/2 —— is_behavior = true 时无条件调用，属必需，
+%%      默认 handler wsTPHer 已提供「忽略」实现，业务 handler 自行覆盖；
+%%   supportedProtocols/0、supportedExtensions/0 —— 预留接口，引擎当前未调用，属可选。
+-optional_callbacks([init/1, handleWs/3, terminate/2, supportedProtocols/0, supportedExtensions/0]).

@@ -1,10 +1,16 @@
 -module(wsTPHer).
 -include("wsCom.hrl").
 -include_lib("kernel/include/file.hrl").
+-behaviour(wsHer).
+
 -export([
    handle/3
    , init/1
    , handleWs/3
+   , handleCall/3
+   , handleCast/2
+   , handleInfo/2
+   , terminate/2
    , supportedProtocols/0
    , supportedExtensions/0
 ]).
@@ -558,3 +564,21 @@ supportedProtocols() ->
 -spec supportedExtensions() -> [binary()].
 supportedExtensions() ->
    [].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% behaviour 回调的默认实现 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% wsHttp 引擎在 is_behavior = true 时无条件调用下面三个回调（不再另做
+%% function_exported 检查），所以默认 handler 必须给出实现。
+%% 默认语义是「忽略该消息、WebState 保持不变」，需要真处理时由业务 handler 覆盖。
+handleCall(_Request, _WebState, _From) ->
+   kpS.
+
+handleCast(_Request, _WebState) ->
+   kpS.
+
+handleInfo(_Info, _WebState) ->
+   kpS.
+
+%% @doc 连接关闭时的收尾。默认不做任何事。
+terminate(_Reason, _WebState) ->
+   ignore.

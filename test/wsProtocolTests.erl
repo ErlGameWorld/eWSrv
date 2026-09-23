@@ -7,6 +7,14 @@ conflicting_content_length_test() ->
    Req = <<"POST / HTTP/1.1\r\n", "Host: localhost\r\n", "Content-Length: 4\r\n", "Content-Length: 5\r\n", "\r\n" >>,
    ?assertMatch({error, conflicting_content_length}, wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
 
+content_length_rejects_signed_decimal_test() ->
+   Req = <<"POST / HTTP/1.1\r\n", "Host: localhost\r\n",
+      "Content-Length: +4\r\n", "\r\n", "test">>,
+   ?assertMatch(
+      {error, invalid_content_length},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})
+   ).
+
 content_length_transfer_encoding_conflict_test() ->
    Req = <<
       "POST / HTTP/1.1\r\n",
@@ -24,6 +32,24 @@ content_length_transfer_encoding_conflict_test() ->
 missing_host_http11_test() ->
    Req = <<"GET / HTTP/1.1\r\n\r\n">>,
    ?assertMatch({error, missing_host}, wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
+
+origin_form_transport_scheme_test() ->
+   Req = <<"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   {wsDone, HttpState} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   HttpReq = HttpState#wsState.wsReq,
+   ?assertEqual(<<"http">>, HttpReq#wsReq.scheme),
+   ?assertEqual(80, HttpReq#wsReq.port),
+   {wsDone, HttpsState} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
+   HttpsReq = HttpsState#wsState.wsReq,
+   ?assertEqual(<<"https">>, HttpsReq#wsReq.scheme),
+   ?assertEqual(443, HttpsReq#wsReq.port).
+
+origin_form_explicit_host_port_test() ->
+   Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(<<"https">>, WsReq#wsReq.scheme),
+   ?assertEqual(9443, WsReq#wsReq.port).
 
 chunked_split_boundary_test() ->
    Part1 = <<"POST / HTTP/1.1\r\n", "Host: localhost\r\n", "Transfer-Encoding: chunked\r\n", "\r\n", "4" >>,
@@ -56,6 +82,19 @@ websocket_frame_limit_test() ->
    Frame = <<1:1, 0:3, ?WsOpBinary:4, 1:1, 126:7, 126:16, 0,0,0,0>>,
    State = #wsState{maxWsFrameSize = 125},
    ?assertEqual({close, message_too_big}, wsWebSocket:parseWebSocketFrames(Frame, State, [])).
+
+websocket_rejects_oversized_outbound_control_frame_test() ->
+   Payload = binary:copy(<<"x">>, 126),
+   ?assertEqual(
+      {error, control_frame_too_large},
+      wsWebSocket:sendFrame(undefined, ?WsOpPing, Payload)
+   ).
+
+websocket_rejects_invalid_outbound_text_test() ->
+   ?assertEqual(
+      {error, invalid_utf8},
+      wsWebSocket:sendFrame(undefined, ?WsOpText, <<16#FF>>)
+   ).
 
 websocket_rejects_fragmented_control_frame_test() ->
    Frame = <<0:1, 0:3, ?WsOpPing:4, 1:1, 0:7, 0,0,0,0>>,

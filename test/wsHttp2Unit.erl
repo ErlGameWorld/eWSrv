@@ -921,6 +921,160 @@ rejectsMismatchedScheme() ->
 http2_same_buffer_respects_recv_window_test_() ->
    {timeout, 20, fun sameBufferRespectsRecvWindow/0}.
 
+http2_terminate_fails_pending_chunk_ack_test() ->
+   Parent = self(),
+   Worker = spawn(fun() ->
+      receive
+         Msg -> Parent ! {worker_ack, Msg}
+      end
+   end),
+   State = #{
+      streams => #{
+         1 => #{
+            pending_ack => {Worker, pending_token, self()}
+         }
+      }
+   },
+   ok = wsHttp2:terminate(State),
+   receive
+      {Self, {error, closed}} when Self =:= self() -> ok
+   after 1000 ->
+      ?assert(false)
+   end,
+   receive
+      {worker_ack, {h2_chunk_ack, pending_token, {error, closed}}} -> ok
+   after 1000 ->
+      ?assert(false)
+   end.
+
+http2_rejects_invalid_field_syntax_test_() ->
+   {timeout, 20, fun rejectsInvalidFieldSyntax/0}.
+
+rejectsInvalidFieldSyntax() ->
+   Name = ws_http2_bad_field_syntax_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      Base = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/one">>}
+      ],
+      {B1, Tx1} = wsHpack:encode(Base ++ [{<<"x bad">>, <<"v">>}], wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B1, 1, 16384, true)),
+      IsRst1 = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {Parser2, Frames1} = recvUntil(IsRst1, Sock, Parser1, [], 5000),
+      ?assert(IsRst1(Frames1)),
+
+      {B3, _Tx2} = wsHpack:encode(Base ++ [{<<"x-test">>, <<" leading">>}], Tx1),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B3, 3, 16384, true)),
+      IsRst3 = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _, 3, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser3, Frames2} = recvUntil(IsRst3, Sock, Parser2, Frames1, 5000),
+      ?assert(IsRst3(Frames2)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_rejects_signed_content_length_test_() ->
+   {timeout, 20, fun rejectsSignedContentLength/0}.
+
+rejectsSignedContentLength() ->
+   Name = ws_http2_signed_cl_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"+0">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_goaway_no_error_drains_open_stream_test_() ->
+   {timeout, 20, fun goawayDrainsOpenStream/0}.
+
+goawayDrainsOpenStream() ->
+   Name = ws_http2_goaway_drain_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/slow">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, [
+         wsHttp2Frame:headersFrames(Block, 1, 16384, true),
+         %% A client GOAWAY identifies server-initiated streams; this server
+         %% does not push, so Last-Stream-ID=0 is the normal graceful value.
+         wsHttp2Frame:goawayFrame(0, no_error)
+      ]),
+      {_Parser2, Frames} = recvUntil(fun(Fs) -> streamEnded(1, Fs) end,
+         Sock, Parser1, [], 3000),
+      {_Headers, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"slow">>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+http2_ignores_unknown_flag_bits_test_() ->
+   {timeout, 20, fun ignoresUnknownFlagBits/0}.
+
+ignoresUnknownFlagBits() ->
+   Name = ws_http2_unknown_flags_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      Payload = <<"flagtest">>,
+      %% RFC 9113 §4.1: undefined flag bits must be ignored on receipt.
+      ok = gen_tcp:send(Sock, wsHttp2Frame:frame(ping, 0, Payload, 16#80)),
+      IsPong = fun(Fs) -> lists:any(fun
+         ({frame, ping, Flags, 0, P}) -> P =:= Payload andalso Flags band 1 =/= 0;
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsPong, Sock, Parser1, [], 5000),
+      ?assert(IsPong(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+goaway_reserved_bit_is_ignored_test() ->
+   Payload = <<1:1, 3:31, 0:32, "debug">>,
+   ?assertEqual({ok, 3, no_error, <<"debug">>}, wsHttp2Frame:goawayFields(Payload)).
+
+hpack_decoder_can_restore_table_size_test() ->
+   Ctx0 = wsHpack:new(4096),
+   %% Dynamic table size 0 is legal and clears the table.
+   {ok, [], Ctx1} = wsHpack:decode(<<16#20>>, Ctx0),
+   %% A later header block may restore it up to SETTINGS_HEADER_TABLE_SIZE.
+   Restore4096AndGet = <<16#3F, 16#E1, 16#1F, 16#82>>,
+   ?assertMatch(
+      {ok, [{<<":method">>, <<"GET">>}], _},
+      wsHpack:decode(Restore4096AndGet, Ctx1)
+   ).
+
 %% 同一份二进制里的 DATA 必须共用进入 handleData 之前的接收窗口。
 %% 按 TCP 分段送进去会在两次 recv 之间补窗口，测不到这一点。
 sameBufferRespectsRecvWindow() ->
