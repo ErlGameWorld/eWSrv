@@ -43,6 +43,9 @@
 -define(SETTINGS_LIMIT, 10).
 -define(PRIORITY_LIMIT, 200).
 -define(FRAME_RATE_WINDOW_MS, 1000).
+%% 单次 socket send 最多聚合这么多 DATA payload。减少 syscall/BIF 次数，
+%% 同时避免超大窗口下一次 send 构造过大的 iolist、长期占住 connection owner。
+-define(SEND_BATCH_BYTES, 256 * 1024).
 
 %% HTTP/2 server connection state. Socket ownership remains in wsHttp; this
 %% module is a protocol state machine and performs writes through wsNet.
@@ -1276,8 +1279,17 @@ sendFileResponse(StreamId, Code, Headers, Filename, Offset, Length, Method, Stat
    end.
 
 sendResponse(StreamId, Code, Headers0, Body0, Method, State0) ->
-   Body = iolist_to_binary(Body0),
-   sendResponse(StreamId, Code, Headers0, Body, byte_size(Body), Method, State0).
+   DeclaredSize = iolist_size(Body0),
+   Informational = is_integer(Code) andalso Code >= 100 andalso Code < 200,
+   NoBody = Method =:= 'HEAD' orelse Code =:= 204 orelse Code =:= 205
+      orelse Code =:= 304 orelse Informational,
+   %% HEAD/no-body status 只需要声明长度，不应为了随后丢弃而复制整个 iolist。
+   Body = case NoBody of
+      true -> <<>>;
+      false when is_binary(Body0) -> Body0;
+      false -> iolist_to_binary(Body0)
+   end,
+   sendResponse(StreamId, Code, Headers0, Body, DeclaredSize, Method, State0).
 
 sendResponse(StreamId, Code, Headers0, Body, DeclaredSize, Method, State0) ->
    Informational = is_integer(Code) andalso Code >= 100 andalso Code < 200,
@@ -1358,19 +1370,25 @@ normalizeResponseHeaders([], Acc) ->
 normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
    %% 已是小写的 binary 不分配；handler 常给 <<"content-type">> 这类字面量。
    Name = wsUtil:ensureLower(toBinary(Name0)),
-   Value = toBinary(Value0),
-   case {Name, isHopByHop(Name), validMethod(Name), validHeaderValue(Value)} of
-      {<<"content-length">>, _, _, _} ->
-         %% HTTP/2 framing owns content-length; never pass handler's copy through.
+   %% 框架自管/禁止字段先判名字：被丢弃的字段无需再转换和扫描 value。
+   case Name of
+      <<"content-length">> ->
          normalizeResponseHeaders(Rest, Acc);
-      {_, true, _, _} ->
-         normalizeResponseHeaders(Rest, Acc);
-      {_, false, true, true} ->
-         normalizeResponseHeaders(Rest, [{Name, Value} | Acc]);
       _ ->
-         %% Handler-generated malformed fields must never corrupt the H2 stream.
-         ?wsWarn("ignore invalid HTTP/2 response header name=~p", [Name]),
-         normalizeResponseHeaders(Rest, Acc)
+         case isHopByHop(Name) of
+            true ->
+               normalizeResponseHeaders(Rest, Acc);
+            false ->
+               Value = toBinary(Value0),
+               case validMethod(Name) andalso validHeaderValue(Value) of
+                  true ->
+                     normalizeResponseHeaders(Rest, [{Name, Value} | Acc]);
+                  false ->
+                     %% Handler-generated malformed fields must never corrupt the H2 stream.
+                     ?wsWarn("ignore invalid HTTP/2 response header name=~p", [Name]),
+                     normalizeResponseHeaders(Rest, Acc)
+               end
+         end
    end.
 
 flushAllPending(State0) ->
@@ -1411,7 +1429,8 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
    StreamWin = maps:get(send_window, Stream),
    MaxFrame = maps:get(peer_max_frame, State0),
    MinWindow = erlang:min(ConnWin, StreamWin),
-   Allowed = erlang:max(0, erlang:min(byte_size(Pending), erlang:min(MinWindow, MaxFrame))),
+   WindowBytes = erlang:max(0, erlang:min(byte_size(Pending), MinWindow)),
+   Allowed = erlang:min(WindowBytes, ?SEND_BATCH_BYTES),
    case Allowed of
       0 ->
          case SentAny of
@@ -1419,18 +1438,15 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
             false -> {ok, State0}
          end;
       N ->
-         <<Chunk:N/binary, Rest/binary>> = Pending,
+         <<Batch:N/binary, Rest/binary>> = Pending,
          EndStream = maps:get(pending_end_stream, Stream, true),
          %% pending_file 的剩余量不含当前 pending_send。只有缓冲区和文件都
-         %% 发完，最后一帧才能带 END_STREAM。
+         %% 发完，最后一个 batch 的最后一帧才能带 END_STREAM。
          MoreFile = fileRemaining(Stream) > 0,
-         Flags =
-            case {Rest, EndStream, MoreFile} of
-               {<<>>, true, false} -> ?END_STREAM;
-               _ -> 0
-            end,
-         Frame = wsHttp2Frame:frame(data, StreamId, Chunk, Flags),
-         case wsNet:send(maps:get(socket, State0), Frame) of
+         EndBatch = Rest =:= <<>> andalso EndStream andalso not MoreFile,
+         Frames = wsHttp2Frame:dataFrames(Batch, StreamId, MaxFrame, EndBatch),
+         %% 一个 flow-control burst 一次 send，默认 64KB 窗口由约4次发送降为1次。
+         case wsNet:send(maps:get(socket, State0), Frames) of
             {error, Reason} ->
                completePendingAck(maps:get(pending_ack, Stream, undefined), {error, closed}),
                {error, internal_error, {socket_error, Reason}};
@@ -1445,7 +1461,7 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
                      case fileRemaining(Stream1) of
                         Left when Left > 0 ->
                            %% 大文件按 read-buffer 为粒度刷新 inactivity timer，
-                           %% 而不是每个 16KB DATA frame 都 cancel/send_after。
+                           %% 而不是每个 DATA frame 都 cancel/send_after。
                            flushPending(StreamId, touchStreamTimer(StreamId, State1));
                         _ ->
                            completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
