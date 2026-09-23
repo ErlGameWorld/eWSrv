@@ -60,6 +60,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       %% 之前，本端只能按协议默认值编码。
       tx_hpack => wsHpack:new(),
       streams => #{},
+      send_pending_streams => #{},
       header_frames => none,
       last_client_stream => 0,
       need_client_settings => true,
@@ -1359,7 +1360,9 @@ normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
    end.
 
 flushAllPending(State0) ->
-   Ids = maps:keys(maps:get(streams, State0)),
+   %% Connection WINDOW_UPDATE / peer SETTINGS only need to revisit streams
+   %% that actually have buffered DATA/file bytes waiting for send credit.
+   Ids = maps:keys(maps:get(send_pending_streams, State0, #{})),
    lists:foldl(fun(Id, Acc) ->
       case Acc of
          {ok, State} -> flushPending(Id, State);
@@ -1368,11 +1371,12 @@ flushAllPending(State0) ->
    end, {ok, State0}, Ids).
 
 flushPending(StreamId, State0) ->
-   Streams = maps:get(streams, State0),
+   StateA = markSendPending(StreamId, State0),
+   Streams = maps:get(streams, StateA),
    case maps:get(StreamId, Streams, undefined) of
-      undefined -> {ok, State0};
+      undefined -> {ok, clearSendPending(StreamId, StateA)};
       _Stream ->
-         case prepareSendBuffer(StreamId, State0) of
+         case prepareSendBuffer(StreamId, StateA) of
             {error, Reason} -> {error, internal_error, Reason};
             {ok, State1} ->
                case maps:get(StreamId, maps:get(streams, State1), undefined) of
@@ -1441,7 +1445,7 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
                         pending_ack => undefined,
                         pending_end_stream => false
                      }}},
-                     {ok, touchStreamTimer(StreamId, State2)};
+                     {ok, clearSendPending(StreamId, touchStreamTimer(StreamId, State2))};
                   _ ->
                      flushPendingLoop(StreamId, Rest, State1, true)
                end
@@ -1924,7 +1928,19 @@ dropStream(StreamId, State) ->
          failStreamPendingAck(Stream),
          killStreamWorker(Stream)
    end,
-   State#{streams => maps:remove(StreamId, Streams)}.
+   Pending = maps:get(send_pending_streams, State, #{}),
+   State#{
+      streams => maps:remove(StreamId, Streams),
+      send_pending_streams => maps:remove(StreamId, Pending)
+   }.
+
+markSendPending(StreamId, State) ->
+   Pending = maps:get(send_pending_streams, State, #{}),
+   State#{send_pending_streams => Pending#{StreamId => true}}.
+
+clearSendPending(StreamId, State) ->
+   Pending = maps:get(send_pending_streams, State, #{}),
+   State#{send_pending_streams => maps:remove(StreamId, Pending)}.
 
 %% @doc Stop any outstanding handler workers when the connection goes away.
 terminate(State) ->
@@ -2033,6 +2049,8 @@ maybeFinishStream(StreamId, State0) ->
       {<<>>, 0, true} ->
          completePendingAck(maps:get(pending_ack, Stream, undefined), ok),
          {ok, dropStream(StreamId, State0)};
+      {<<>>, 0, false} ->
+         {ok, clearSendPending(StreamId, State0)};
       _ ->
          {ok, State0}
    end.
