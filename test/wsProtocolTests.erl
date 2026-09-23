@@ -163,6 +163,19 @@ websocket_handshake_header_names_are_case_insensitive_test() ->
    },
    ?assertMatch({ok, _}, wsWebSocket:tryWsUpgrade(Req)).
 
+websocket_subprotocol_negotiation_test() ->
+   Req = #wsReq{
+      headers = [
+         {<<"Sec-WebSocket-Protocol">>, <<"unknown, superchat, chat">>}
+      ]
+   },
+   {wsWebSocket, Headers} =
+      wsWebSocket:handleUpgrade(wsWsProtocolTestHandler, Req, []),
+   ?assertEqual(
+      {<<"Sec-WebSocket-Protocol">>, <<"superchat">>},
+      lists:keyfind(<<"Sec-WebSocket-Protocol">>, 1, Headers)
+   ).
+
 websocket_rejects_unmasked_client_frame_test() ->
    Frame = <<1:1, 0:3, ?WsOpText:4, 0:1, 1:7, "x">>,
    ?assertEqual({close, protocol_error}, wsWebSocket:parseWebSocketFrames(Frame, #wsState{}, [])).
