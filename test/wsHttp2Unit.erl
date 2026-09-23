@@ -342,6 +342,66 @@ informationalFinalRejected() ->
       _ = catch eWSrv:closeSrv(Name)
    end.
 
+http2_large_response_yields_to_other_streams_test_() ->
+   {timeout, 20, fun largeResponseYields/0}.
+
+largeResponseYields() ->
+   Name = ws_http2_fair_send_eunit,
+   _ = catch eWSrv:closeSrv(Name),
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      %% 给足 connection / stream send credit，确保测试到的是服务端调度公平性，
+      %% 不是 flow-control 自然把大流卡住。
+      Credit = 4 * 1024 * 1024,
+      ok = gen_tcp:send(Sock, [
+         wsHttp2Frame:windowUpdateFrame(0, Credit),
+         wsHttp2Frame:windowUpdateFrame(1, Credit),
+         wsHttp2Frame:windowUpdateFrame(3, Credit)
+      ]),
+      H1 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/1m">>}
+      ],
+      H3 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/one">>}
+      ],
+      {B1, Tx1} = wsHpack:encode(H1, wsHpack:new()),
+      {B3, _Tx2} = wsHpack:encode(H3, Tx1),
+      ok = gen_tcp:send(Sock, [
+         wsHttp2Frame:headersFrames(B1, 1, 16384, true),
+         wsHttp2Frame:headersFrames(B3, 3, 16384, true)
+      ]),
+      Done = fun(Fs) -> streamEnded(1, Fs) andalso streamEnded(3, Fs) end,
+      {_Parser2, Frames} = recvUntil(Done, Sock, Parser1, [], 5000),
+      PosSmall = framePosition(fun
+         ({frame, data, _Flags, 3, <<"one">>}) -> true;
+         (_) -> false
+      end, Frames),
+      PosBigEnd = framePosition(fun
+         ({frame, data, Flags, 1, _}) -> Flags band ?END_STREAM =/= 0;
+         ({frame, headers, Flags, 1, _}) -> Flags band ?END_STREAM =/= 0;
+         (_) -> false
+      end, Frames),
+      ?assert(PosSmall > 0),
+      ?assert(PosBigEnd > 0),
+      ?assert(PosSmall < PosBigEnd),
+      gen_tcp:close(Sock)
+   after
+      _ = catch eWSrv:closeSrv(Name)
+   end.
+
+framePosition(Pred, Frames) ->
+   framePosition(Pred, Frames, 1).
+
+framePosition(_Pred, [], _Pos) ->
+   0;
+framePosition(Pred, [Frame | Rest], Pos) ->
+   case Pred(Frame) of
+      true -> Pos;
+      false -> framePosition(Pred, Rest, Pos + 1)
+   end.
+
 http2_streaming_response_respects_header_limit_test_() ->
    {timeout, 20, fun streamingResponseHeaderLimit/0}.
 
