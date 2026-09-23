@@ -339,7 +339,10 @@ sendHandlerFrame(Socket, Opcode, Payload, WebState) ->
 sendFrame(Socket, Opcode, Payload0) ->
    Payload = iolist_to_binary(Payload0),
    case validateOutboundFrame(Opcode, Payload) of
-      ok -> wsNet:send(Socket, encodeFrame(Opcode, Payload));
+      ok ->
+         %% Socket accepts iodata: keep header and payload separate so large
+         %% WebSocket messages are not copied into another full-size binary.
+         wsNet:send(Socket, frameIodata(Opcode, Payload));
       {error, _} = Error -> Error
    end.
 
@@ -368,15 +371,21 @@ encodeFrame(Payload) ->
 
 encodeFrame(Opcode, Payload0) ->
    Payload = iolist_to_binary(Payload0),
+   %% Public API keeps returning one binary for compatibility.
+   iolist_to_binary(frameIodata(Opcode, Payload)).
+
+frameIodata(Opcode, Payload) ->
    PayloadLen = byte_size(Payload),
-   if
-      PayloadLen < 126 ->
-         <<1:1, 0:3, Opcode:4, 0:1, PayloadLen:7, Payload/binary>>;
-      PayloadLen =< 16#FFFF ->
-         <<1:1, 0:3, Opcode:4, 0:1, 126:7, PayloadLen:16, Payload/binary>>;
-      true ->
-         <<1:1, 0:3, Opcode:4, 0:1, 127:7, PayloadLen:64, Payload/binary>>
-   end.
+   Header =
+      if
+         PayloadLen < 126 ->
+            <<1:1, 0:3, Opcode:4, 0:1, PayloadLen:7>>;
+         PayloadLen =< 16#FFFF ->
+            <<1:1, 0:3, Opcode:4, 0:1, 126:7, PayloadLen:16>>;
+         true ->
+            <<1:1, 0:3, Opcode:4, 0:1, 127:7, PayloadLen:64>>
+      end,
+   [Header, Payload].
 
 %% ================================================================================================
 %% Upgrade handshake
