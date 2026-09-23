@@ -1727,14 +1727,22 @@ parseAuthority(<<"[", Rest/binary>>, Scheme) ->
          end
    end;
 parseAuthority(Authority, Scheme) when is_binary(Authority), Authority =/= <<>> ->
-   case binary:split(Authority, <<":">>, [global]) of
-      [Host] when Host =/= <<>> -> {ok, Host, defaultPort(Scheme)};
-      [Host, P] when Host =/= <<>> ->
-         case parsePort(P) of
-            {ok, Port} -> {ok, Host, Port};
-            error -> {error, invalid_authority_port}
+   case binary:match(Authority, <<":">>) of
+      nomatch ->
+         {ok, Authority, defaultPort(Scheme)};
+      {Pos, 1} when Pos > 0 ->
+         <<Host:Pos/binary, ":", P/binary>> = Authority,
+         case binary:match(P, <<":">>) of
+            nomatch ->
+               case parsePort(P) of
+                  {ok, Port} -> {ok, Host, Port};
+                  error -> {error, invalid_authority_port}
+               end;
+            _ ->
+               {error, invalid_authority}
          end;
-      _ -> {error, invalid_authority}
+      _ ->
+         {error, invalid_authority}
    end;
 parseAuthority(_, _) ->
    {error, invalid_authority}.
