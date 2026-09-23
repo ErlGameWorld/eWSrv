@@ -1139,7 +1139,7 @@ handleResponse(StreamId, WorkerPid, Req, Response, State0) ->
 
 %% @doc Convert an abnormal worker exit into a stream-local 500 response.
 handleWorkerDown(MonitorRef, Reason, State0) ->
-   case findWorkerStream(MonitorRef, maps:to_list(maps:get(streams, State0))) of
+   case findWorkerStream(MonitorRef, maps:get(streams, State0)) of
       none ->
          {ok, State0};
       {_StreamId, _Stream} when Reason =:= normal ->
@@ -1155,12 +1155,20 @@ handleWorkerDown(MonitorRef, Reason, State0) ->
          sendHandlerResponse(StreamId, {response, 500, [], <<"Internal server error">>}, Req, State1)
    end.
 
-findWorkerStream(_Ref, []) ->
-   none;
-findWorkerStream(Ref, [{StreamId, #{handler_ref := Ref} = Stream} | _]) ->
-   {StreamId, Stream};
-findWorkerStream(Ref, [_ | Rest]) ->
-   findWorkerStream(Ref, Rest).
+findWorkerStream(Ref, Streams) when is_map(Streams) ->
+   %% DOWN 是低频/竞态路径，但无需先把整个 streams map 复制成 list。
+   %% iterator 还能在命中 monitor ref 后立即停止。
+   findWorkerStreamIter(Ref, maps:iterator(Streams)).
+
+findWorkerStreamIter(Ref, Iter) ->
+   case maps:next(Iter) of
+      none ->
+         none;
+      {StreamId, #{handler_ref := Ref} = Stream, _Next} ->
+         {StreamId, Stream};
+      {_StreamId, _Stream, Next} ->
+         findWorkerStreamIter(Ref, Next)
+   end.
 
 callHandler(WsMod, Method, Path, Req) ->
    try WsMod:handle(Method, Path, Req) of
@@ -1368,13 +1376,13 @@ normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
 flushAllPending(State0) ->
    %% Connection WINDOW_UPDATE / peer SETTINGS only need to revisit streams
    %% that actually have buffered DATA/file bytes waiting for send credit.
-   Ids = maps:keys(maps:get(send_pending_streams, State0, #{})),
-   lists:foldl(fun(Id, Acc) ->
+   %% 直接 fold 原 map，避免 maps:keys/1 为每次窗口更新分配临时 id list。
+   maps:fold(fun(Id, _True, Acc) ->
       case Acc of
          {ok, State} -> flushPending(Id, State);
          Other -> Other
       end
-   end, {ok, State0}, Ids).
+   end, {ok, State0}, maps:get(send_pending_streams, State0, #{})).
 
 flushPending(StreamId, State0) ->
    StateA = markSendPending(StreamId, State0),
@@ -1942,11 +1950,17 @@ dropStream(StreamId, State) ->
 
 markSendPending(StreamId, State) ->
    Pending = maps:get(send_pending_streams, State, #{}),
-   State#{send_pending_streams => Pending#{StreamId => true}}.
+   case maps:is_key(StreamId, Pending) of
+      true -> State;
+      false -> State#{send_pending_streams => Pending#{StreamId => true}}
+   end.
 
 clearSendPending(StreamId, State) ->
    Pending = maps:get(send_pending_streams, State, #{}),
-   State#{send_pending_streams => maps:remove(StreamId, Pending)}.
+   case maps:is_key(StreamId, Pending) of
+      true -> State#{send_pending_streams => maps:remove(StreamId, Pending)};
+      false -> State
+   end.
 
 %% @doc Stop any outstanding handler workers when the connection goes away.
 terminate(State) ->
