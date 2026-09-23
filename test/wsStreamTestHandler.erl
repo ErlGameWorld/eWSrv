@@ -21,6 +21,14 @@ handle('GET', <<"/finite">>, _Req) ->
       Conn ! {chunk, close}
    end),
    {chunk, [{<<"Content-Type">>, <<"text/plain">>}]};
+handle('GET', <<"/delayed-finite">>, _Req) ->
+   Conn = self(),
+   spawn(fun() ->
+      timer:sleep(100),
+      Conn ! {chunk, <<"done">>},
+      Conn ! {chunk, close}
+   end),
+   {chunk, [{<<"Content-Type">>, <<"text/plain">>}]};
 handle('GET', <<"/hello">>, _Req) ->
    {200, [{<<"Content-Type">>, <<"text/plain">>}], <<"hello">>};
 handle(_, _, _Req) ->
