@@ -11,6 +11,8 @@ listenOpt() |                 %% eNet相关配置
 {maxWsFrameSize, pos_integer()} |        %% WebSocket单帧最大值 默认1MB
 {maxWsMessageSize, pos_integer()} |      %% WebSocket单消息最大值 默认8MB
 {http2, boolean()} |                     %% 是否启用HTTP/2（TLS ALPN + 明文prior knowledge）
+{http2MaxConcurrentStreams, pos_integer()} | %% 本端允许的HTTP/2并发stream上限 默认100
+{http2ReceiveWindow, 65535..2147483647} |    %% H2 stream+connection接收窗口 默认65535
 {requestTimeout, pos_integer()} |        %% 单个请求接收超时 默认30秒
 {keepAliveTimeout, pos_integer()} |      %% 空闲连接超时 默认60秒
 {chunkedSupp, boolean()}.                %% 服务器是否允许客户端发送Transfer-Encoding: chunked 默认false
