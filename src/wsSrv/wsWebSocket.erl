@@ -143,26 +143,24 @@ takeMaskAndLen(PayloadLength, Rest, Data, Fin, Opcode, _State) ->
          {incomplete, Data}
    end.
 
-%% 掩码 4 字节周期且从 index 0 对齐，整字异或；尾部 0~3 字节逐字节处理。
+%% 掩码 4 字节周期且从 index 0 对齐。大帧使用 binary comprehension
+%% 直接构造目标 binary，避免每 4 字节分配一个小 binary + cons cell。
 unmaskData(<<>>, _Mask) -> <<>>;
 unmaskData(Data, <<M0:8, M1:8, M2:8, M3:8>>) ->
    M32 = (M0 bsl 24) bor (M1 bsl 16) bor (M2 bsl 8) bor M3,
-   %% 不能在每个 32-bit word 上做 <<Acc/binary,...>>：大帧会退化成 O(n²)
-   %% 拷贝。反向累计小 binary，收尾只拼接一次。
-   unmaskWords(Data, M32, M0, M1, M2, M3, []).
-
-unmaskWords(<<W:32, Rest/binary>>, M32, M0, M1, M2, M3, Acc) ->
-   unmaskWords(Rest, M32, M0, M1, M2, M3, [<<(W bxor M32):32>> | Acc]);
-unmaskWords(<<A:8, B:8, C:8>>, _M32, M0, M1, M2, _M3, Acc) ->
-   iolist_to_binary(lists:reverse([
-      <<(A bxor M0):8, (B bxor M1):8, (C bxor M2):8>> | Acc
-   ]));
-unmaskWords(<<A:8, B:8>>, _M32, M0, M1, _M2, _M3, Acc) ->
-   iolist_to_binary(lists:reverse([<<(A bxor M0):8, (B bxor M1):8>> | Acc]));
-unmaskWords(<<A:8>>, _M32, M0, _M1, _M2, _M3, Acc) ->
-   iolist_to_binary(lists:reverse([<<(A bxor M0):8>> | Acc]));
-unmaskWords(<<>>, _M32, _M0, _M1, _M2, _M3, Acc) ->
-   iolist_to_binary(lists:reverse(Acc)).
+   WordBytes = (byte_size(Data) div 4) * 4,
+   <<Words:WordBytes/binary, Tail/binary>> = Data,
+   Unmasked = << <<(W bxor M32):32>> || <<W:32>> <= Words >>,
+   case Tail of
+      <<>> ->
+         Unmasked;
+      <<A:8>> ->
+         <<Unmasked/binary, (A bxor M0):8>>;
+      <<A:8, B:8>> ->
+         <<Unmasked/binary, (A bxor M0):8, (B bxor M1):8>>;
+      <<A:8, B:8, C:8>> ->
+         <<Unmasked/binary, (A bxor M0):8, (B bxor M1):8, (C bxor M2):8>>
+   end.
 
 %% ================================================================================================
 %% Frame processing / fragmentation
