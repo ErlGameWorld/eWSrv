@@ -55,6 +55,17 @@ origin_form_query_keeps_existing_semantics_test() ->
    ?assertEqual(<<"1">>, maps:get(<<"a">>, Args)),
    ?assertEqual(<<"two">>, maps:get(<<"b">>, Args)).
 
+origin_form_fragment_is_rejected_test() ->
+   Req = <<"GET /hello#frag HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   ?assertMatch({error, invalid_uri},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
+
+connection_tokens_are_cached_during_parse_test() ->
+   Req = <<"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: Keep-Alive, Foo\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual(false, State#wsState.reqConnClose),
+   ?assertEqual(true, State#wsState.reqConnKeepAlive).
+
 origin_form_explicit_host_port_test() ->
    Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
