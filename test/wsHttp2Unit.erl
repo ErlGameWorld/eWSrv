@@ -742,6 +742,17 @@ data_frames_end_stream_helper_test() ->
    {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
    ?assertMatch([{frame, data, 0, 3, _}, {frame, data, 0, 3, _}, {frame, data, ?END_STREAM, 3, _}], Frames).
 
+data_frames_open_batch_helper_test() ->
+   Body = binary:copy(<<"x">>, 40),
+   Io = wsHttp2Frame:dataFrames(Body, 3, 16, false),
+   {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
+   ?assertMatch([
+      {frame, data, 0, 3, _},
+      {frame, data, 0, 3, _},
+      {frame, data, 0, 3, _}
+   ], Frames).
+
+
 hpack_static_decode_regression_test() ->
    {ok, [{<<":method">>, <<"GET">>}], _} =
       wsHpack:decode(<<16#82>>, wsHpack:new()).
