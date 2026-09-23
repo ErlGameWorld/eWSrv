@@ -336,6 +336,8 @@ parseChunkedState(Data, #wsState{chunkState = trailers, maxHeaderSize = MaxHeade
 
 finishBody([]) ->
    <<>>;
+finishBody([One]) when is_binary(One) ->
+   One;
 finishBody(Acc) ->
    iolist_to_binary(lists:reverse(Acc)).
 
