@@ -17,8 +17,7 @@ run() ->
 
 run(Opts) when is_map(Opts) ->
    Requests = positive(maps:get(requests, Opts, 10000), requests),
-   Concurrency0 = positive(maps:get(concurrency, Opts, 32), concurrency),
-   Concurrency = erlang:min(100, Concurrency0),
+   Concurrency = positive(maps:get(concurrency, Opts, 32), concurrency),
    Warmup = nonNegative(maps:get(warmup, Opts, 1000), warmup),
    Path = maps:get(path, Opts, <<"/one">>),
    Quiet = maps:get(quiet, Opts, false),
