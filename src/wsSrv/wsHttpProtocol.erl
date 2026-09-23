@@ -528,11 +528,12 @@ parsePath({abs_path, FullPath}) when is_binary(FullPath) ->
       {_, _} ->
          {error, invalid_uri};
       nomatch ->
-         case binary:split(FullPath, <<"?">>) of
-            [Path0] ->
-               Path = case Path0 of <<>> -> <<"/">>; _ -> Path0 end,
+         case binary:match(FullPath, <<"?">>) of
+            nomatch ->
+               Path = case FullPath of <<>> -> <<"/">>; _ -> FullPath end,
                {ok, undefined, undefined, undefined, Path, []};
-            [Path0, Query] ->
+            {Pos, 1} ->
+               <<Path0:Pos/binary, "?", Query/binary>> = FullPath,
                Path = case Path0 of <<>> -> <<"/">>; _ -> Path0 end,
                try
                   {ok, undefined, undefined, undefined, Path, uri_string:dissect_query(Query)}
