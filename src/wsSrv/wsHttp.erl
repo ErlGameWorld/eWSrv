@@ -763,25 +763,30 @@ normalizeContentLength(_Code, _Method, BodySize, Headers) ->
 
 %% @doc Generate a HTTP response and send it to the client.
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
-   Body =
-      case Method of
-         'HEAD' ->
-            <<>>;
-         _ ->
-            case Code of
-               304 ->
-                  <<>>;
-               204 ->
-                  <<>>;
-               205 ->
-                  <<>>;
-               _ ->
-                  UserBody
-            end
-      end,
-
+   Body = responseBody(Method, Code, UserBody),
    Response = httpResponse(Code, Headers, Body),
-	wsNet:send(Socket, Response).
+   wsNet:send(Socket, Response).
+
+%% Normal-response hot path. Headers are already normalized and validated by
+%% prepareResponseHeaders/1; framework-owned headers are trusted values.
+sendPreparedResponse(Socket, Method, Code, Headers, UserBody) ->
+   Body = responseBody(Method, Code, UserBody),
+   Response = [
+      <<"HTTP/1.1 ">>, status(Code), <<"\r\n">>,
+      spellPreparedHeaders(Headers), <<"\r\n">>, Body
+   ],
+   wsNet:send(Socket, Response).
+
+responseBody('HEAD', _Code, _UserBody) ->
+   <<>>;
+responseBody(_Method, 304, _UserBody) ->
+   <<>>;
+responseBody(_Method, 204, _UserBody) ->
+   <<>>;
+responseBody(_Method, 205, _UserBody) ->
+   <<>>;
+responseBody(_Method, _Code, UserBody) ->
+   UserBody.
    %%case wsNet:send(Socket, Response) of
    %%   ok ->
    %%      ok;
@@ -799,25 +804,31 @@ sendResponse(Socket, Method, Code, Headers, UserBody) ->
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
    BodySize = iolist_size(Body),
-   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205) orelse (Code =:= 304) orelse BodySize < 1024,
+   {SBody, SHeaders, _Size} =
+      tryCompressResponseSized(Body, BodySize, UserHeaders, ReqHeaders, Code, Method),
+   {SBody, SHeaders}.
+
+tryCompressResponseSized(Body, BodySize, UserHeaders, ReqHeaders, Code, Method) ->
+   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205)
+      orelse (Code =:= 304) orelse BodySize < 1024,
    case Skip of
       true ->
-         {Body, UserHeaders};
+         {Body, UserHeaders, BodySize};
       false ->
          case findHeader(<<"Content-Encoding">>, UserHeaders) of
             false ->
                case chooseContentEncoding(ReqHeaders) of
                   none ->
-                     {Body, UserHeaders};
+                     {Body, UserHeaders, BodySize};
                   gzip ->
                      CBody = zlib:gzip(iolist_to_binary(Body)),
-                     {CBody, addVary([{<<"Content-Encoding">>, <<"gzip">>} | UserHeaders])};
+                     {CBody, addVary([{<<"Content-Encoding">>, <<"gzip">>} | UserHeaders]), byte_size(CBody)};
                   deflate ->
                      CBody = zlib:compress(iolist_to_binary(Body)),
-                     {CBody, addVary([{<<"Content-Encoding">>, <<"deflate">>} | UserHeaders])}
+                     {CBody, addVary([{<<"Content-Encoding">>, <<"deflate">>} | UserHeaders]), byte_size(CBody)}
                end;
             _ ->
-               {Body, UserHeaders}
+               {Body, UserHeaders, BodySize}
          end
    end.
 
@@ -1042,6 +1053,14 @@ spellHeaders(Headers) ->
       || Header <- Headers,
          {ok, Name, Value} <- [wireHeader(Header)]].
 
+spellPreparedHeaders(Headers) ->
+   [[Name, <<": ">>, preparedHeaderValue(Value), <<"\r\n">>] || {Name, Value} <- Headers].
+
+preparedHeaderValue(Value) when is_binary(Value) -> Value;
+preparedHeaderValue(Value) when is_integer(Value) -> integer_to_binary(Value);
+preparedHeaderValue(Value) when is_atom(Value) -> atom_to_binary(Value);
+preparedHeaderValue(Value) when is_list(Value) -> iolist_to_binary(Value).
+
 %% 热路径：handler / 框架给出的头几乎全是 binary，走无 try 的快路径。
 wireHeader({Name, Value}) when is_binary(Name), is_binary(Value), Name =/= <<>> ->
    case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
@@ -1105,6 +1124,62 @@ binaryHeaderNames([{Key, _Value} | Rest]) when is_binary(Key) ->
 binaryHeaderNames(_) ->
    false.
 
+%% One-pass preparation for ordinary responses: normalize and validate user
+%% headers, drop framing headers owned by the server, and extract Connection.
+prepareResponseHeaders(Headers) ->
+   prepareResponseHeaders(Headers, false, []).
+
+prepareResponseHeaders([], HasClose, Acc) ->
+   {lists:reverse(Acc), HasClose};
+prepareResponseHeaders([{Key0, Value0} | Rest], HasClose, Acc) ->
+   try
+      Name = toBinStr(Key0),
+      Value = toBinStr(Value0),
+      case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+         false ->
+            ?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+            prepareResponseHeaders(Rest, HasClose, Acc);
+         true ->
+            case managedResponseHeader(Name) of
+               content_length ->
+                  prepareResponseHeaders(Rest, HasClose, Acc);
+               transfer_encoding ->
+                  prepareResponseHeaders(Rest, HasClose, Acc);
+               connection ->
+                  prepareResponseHeaders(
+                     Rest,
+                     HasClose orelse headerValueHasToken(Value, <<"close">>),
+                     Acc
+                  );
+               normal ->
+                  prepareResponseHeaders(Rest, HasClose, [{Name, Value} | Acc])
+            end
+      end
+   catch
+      _:_ ->
+         prepareResponseHeaders(Rest, HasClose, Acc)
+   end;
+prepareResponseHeaders([_ | Rest], HasClose, Acc) ->
+   prepareResponseHeaders(Rest, HasClose, Acc).
+
+managedResponseHeader(Name) when byte_size(Name) =:= 10 ->
+   case wsUtil:headerNameEq(Name, <<"Connection">>) of
+      true -> connection;
+      false -> normal
+   end;
+managedResponseHeader(Name) when byte_size(Name) =:= 14 ->
+   case wsUtil:headerNameEq(Name, <<"Content-Length">>) of
+      true -> content_length;
+      false -> normal
+   end;
+managedResponseHeader(Name) when byte_size(Name) =:= 17 ->
+   case wsUtil:headerNameEq(Name, <<"Transfer-Encoding">>) of
+      true -> transfer_encoding;
+      false -> normal
+   end;
+managedResponseHeader(_Name) ->
+   normal.
+
 %% header 名按 RFC 7230 大小写不敏感。旧实现每次 toLowerStr 分配临时 binary，
 %% 响应热路径上每请求十余次查找，吃掉约 15~20% 吞吐。
 %% 现在：先 lists:keyfind（BIF，规范大小写时直接命中），未命中再零分配 CI 比较。
@@ -1159,6 +1234,24 @@ connectionPolicy(UserHeaders, ReqHeaders, Version) ->
       false ->
          keep_alive
    end.
+
+connectionPolicyPrepared(true, _ReqConn, _Version) ->
+   close;
+connectionPolicyPrepared(false, {true, _ReqKeepAlive}, _Version) ->
+   close;
+connectionPolicyPrepared(false, {false, true}, {1, 0}) ->
+   keep_alive;
+connectionPolicyPrepared(false, {false, false}, {1, 0}) ->
+   close;
+connectionPolicyPrepared(false, _ReqConn, _Version) ->
+   keep_alive.
+
+addConnectionHeaderPrepared(Headers, close, _Version) ->
+   [{<<"Connection">>, <<"close">>} | Headers];
+addConnectionHeaderPrepared(Headers, keep_alive, {1, 0}) ->
+   [{<<"Connection">>, <<"Keep-Alive">>} | Headers];
+addConnectionHeaderPrepared(Headers, keep_alive, _Version) ->
+   Headers.
 
 addConnectionHeader(Headers0, Policy, Version) ->
    Headers = deleteHeader(<<"Connection">>, Headers0),
