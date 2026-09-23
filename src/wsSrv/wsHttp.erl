@@ -830,13 +830,18 @@ tryCompressResponseSized(Body, BodySize, UserHeaders, ReqHeaders, Code, Method) 
    end.
 
 chooseContentEncoding(ReqHeaders) ->
-   case findHeader(<<"Accept-Encoding">>, ReqHeaders) of
+   %% decode_packet/H2 compatibility layer both expose the standard header as
+   %% 'Accept-Encoding'. Common path is a single keyfind; binary fallback keeps
+   %% compatibility with hand-built request records.
+   Header = case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
+      {_, _} = Found -> Found;
+      false -> findHeader(<<"Accept-Encoding">>, ReqHeaders)
+   end,
+   case Header of
       false ->
          none;
-      {_, Value} ->
-         Encodings = parseAcceptEncodings(iolist_to_binary(Value)),
-         GzipQ = encodingQ(<<"gzip">>, Encodings),
-         DeflateQ = encodingQ(<<"deflate">>, Encodings),
+      {_, Value0} ->
+         {GzipQ, DeflateQ} = acceptEncodingQ(iolist_to_binary(Value0)),
          case {GzipQ, DeflateQ} of
             {G, D} when G > 0, G >= D -> gzip;
             {_G, D} when D > 0 -> deflate;
@@ -844,22 +849,53 @@ chooseContentEncoding(ReqHeaders) ->
          end
    end.
 
-parseAcceptEncodings(Value) ->
-   [
-      begin
-         Parts = [string:trim(P) || P <- binary:split(string:lowercase(Token), <<";">>, [global])],
-         case Parts of
-            [Encoding] -> {Encoding, 1000};
-            [Encoding | Params] -> {Encoding, parseEncodingQ(Params)}
-         end
-      end
-      || Token <- binary:split(Value, <<",">>, [global])
-   ].
+acceptEncodingQ(Value) ->
+   Tokens = binary:split(Value, <<",">>, [global]),
+   {G0, D0, Star, GSeen, DSeen} =
+      acceptEncodingQ(Tokens, 0, 0, 0, false, false),
+   G = case GSeen of true -> G0; false -> Star end,
+   D = case DSeen of true -> D0; false -> Star end,
+   {G, D}.
 
-parseEncodingQ(Params) ->
-   case [V || P <- Params, [K, V] <- [binary:split(P, <<"=">>)], string:trim(K) =:= <<"q">>] of
-      [Q | _] -> qValue(string:trim(Q));
-      [] -> 1000
+acceptEncodingQ([], G, D, Star, GSeen, DSeen) ->
+   {G, D, Star, GSeen, DSeen};
+acceptEncodingQ([Token0 | Rest], G, D, Star, GSeen, DSeen) ->
+   Parts = binary:split(Token0, <<";">>, [global]),
+   [Name0 | Params] = Parts,
+   Name = string:trim(Name0),
+   Q = parseEncodingQ(Params),
+   case true of
+      _ when GSeen =:= false ->
+         case wsUtil:headerNameEq(Name, <<"gzip">>) of
+            true -> acceptEncodingQ(Rest, Q, D, Star, true, DSeen);
+            false -> acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen)
+         end;
+      _ ->
+         acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen)
+   end.
+
+acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen) ->
+   case {DSeen, wsUtil:headerNameEq(Name, <<"deflate">>)} of
+      {false, true} ->
+         acceptEncodingQ(Rest, G, Q, Star, GSeen, true);
+      _ ->
+         case wsUtil:headerNameEq(Name, <<"*">>) of
+            true -> acceptEncodingQ(Rest, G, D, Q, GSeen, DSeen);
+            false -> acceptEncodingQ(Rest, G, D, Star, GSeen, DSeen)
+         end
+   end.
+
+parseEncodingQ([]) ->
+   1000;
+parseEncodingQ([Param | Rest]) ->
+   case binary:split(Param, <<"=">>) of
+      [K, V] ->
+         case wsUtil:headerNameEq(string:trim(K), <<"q">>) of
+            true -> qValue(string:trim(V));
+            false -> parseEncodingQ(Rest)
+         end;
+      _ ->
+         parseEncodingQ(Rest)
    end.
 
 qValue(<<"0">>) -> 0;
@@ -877,15 +913,6 @@ allZero(<<>>) -> true;
 allZero(<<$0, Rest/binary>>) -> allZero(Rest);
 allZero(_) -> false.
 
-encodingQ(Name, Encodings) ->
-   case lists:keyfind(Name, 1, Encodings) of
-      {_, Q} -> Q;
-      false ->
-         case lists:keyfind(<<"*">>, 1, Encodings) of
-            {_, Q} -> Q;
-            false -> 0
-         end
-   end.
 
 addVary(Hs) ->
    case findHeader(<<"Vary">>, Hs) of
