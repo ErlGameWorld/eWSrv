@@ -193,10 +193,15 @@ headersFrames(Block, StreamId, MaxFrame) ->
       MaxFrame :: pos_integer(), EndStream :: boolean().
 headersFrames(Block, StreamId, MaxFrame, EndStream) ->
    BaseFlags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
-   case splitPayload(iolist_to_binary(Block), MaxFrame) of
-      [] -> frame(headers, StreamId, <<>>, BaseFlags bor ?FLAG_END_HEADERS);
-      [Last] -> frame(headers, StreamId, Last, BaseFlags bor ?FLAG_END_HEADERS);
-      [First | Rest] ->
+   Size = iolist_size(Block),
+   case Size =< MaxFrame of
+      true ->
+         %% 绝大多数 HPACK block 只有几百字节。frame/4 原生接受 iodata，
+         %% 不要为了单个 HEADERS frame 先把整个 HPACK iolist 复制成 binary。
+         frame(headers, StreamId, Block, BaseFlags bor ?FLAG_END_HEADERS);
+      false ->
+         %% 只有真的需要 CONTINUATION 时才扁平化，便于按字节边界切分。
+         [First | Rest] = splitPayload(iolist_to_binary(Block), MaxFrame),
          [frame(headers, StreamId, First, BaseFlags) |
             continuationFrames(Rest, StreamId)]
    end.
