@@ -627,7 +627,7 @@ doHandle(State) ->
       {chunk, Headers} -> {chunk, Headers, <<"">>};
       {chunk, Headers, Initial} -> {chunk, Headers, Initial};
       %% WebSocket升级
-      {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, Headers);
+      {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, WsReq, Headers);
       %% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
       {HttpCode, Headers, {file, Filename}}
          when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
