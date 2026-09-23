@@ -309,8 +309,8 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
             {stop, Reason, NWebState} ->
                {close, Reason, NWebState};
             Unexpected ->
-               ?wsErr("handleWs return error FragOpcode:~p WebState:~p Unexpected:~p~n",
-                  [FragOpcode, WebState, Unexpected]),
+               ?wsErr("handleWs return error opcode=~p state_shape=~p ret_shape=~p~n",
+                  [FragOpcode, termShape(WebState), termShape(Unexpected)]),
                {ok, WebState}
          catch
             throw:{ROpCode, RetBody, NWebState} when is_integer(ROpCode) ->
@@ -324,11 +324,24 @@ doHandleWs(FragOpcode, Payload, WebState, WsMod, Socket) ->
             throw:{stop, Reason, NWebState} ->
                {close, Reason, NWebState};
             Class:Reason:Stacktrace ->
-               ?wsErr("handleWs exception opcode:~p class:~p reason:~p stack:~p~n",
-                  [FragOpcode, Class, Reason, Stacktrace]),
+               ?wsErr("handleWs exception opcode=~p state_shape=~p class=~p reason=~P stack=~P~n",
+                  [FragOpcode, termShape(WebState), Class, Reason, 8, Stacktrace, 12]),
                {ok, WebState}
          end
    end.
+
+termShape(Term) when is_binary(Term) -> {binary, byte_size(Term)};
+termShape(Term) when is_list(Term) -> list;
+termShape(Term) when is_map(Term) -> {map, map_size(Term)};
+termShape(Term) when is_tuple(Term), tuple_size(Term) > 0 ->
+   case element(1, Term) of
+      Tag when is_atom(Tag) -> {tuple, tuple_size(Term), Tag};
+      _ -> {tuple, tuple_size(Term)}
+   end;
+termShape(Term) when is_atom(Term) -> Term;
+termShape(Term) when is_integer(Term) -> integer;
+termShape(Term) when is_float(Term) -> float;
+termShape(_) -> other.
 
 sendHandlerFrame(Socket, Opcode, Payload, WebState) ->
    case sendFrame(Socket, Opcode, Payload) of
