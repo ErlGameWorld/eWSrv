@@ -107,7 +107,7 @@
 %% @doc 构造单个无 flag 的 frame，`frame(Type, StreamId, Payload)' 的简写。
 %% @param Type frame 类型原子（或 0..255 的自定义类型号）
 %% @param StreamId stream 标识；连接级 frame（SETTINGS/PING/GOAWAY）用 0
-%% @param Payload frame 负载，iolist 会先被扁平化成 binary
+%% @param Payload frame 负载，可直接使用 iodata；发送前不会强制整块扁平化
 %% @returns iolist，可直接投递给 socket
 -spec frame(frame_type(), non_neg_integer(), iodata()) -> iodata().
 frame(Type, StreamId, Payload) ->
