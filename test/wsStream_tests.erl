@@ -26,6 +26,16 @@ disconnectTest(Transport, Port) ->
          error(stream_disconnect_timeout)
       end.
 
+linked_stream_producer_crash_closes_connection_test() ->
+   withServer(tcp, fun(Port) ->
+      {ok, Socket} = connect(tcp, Port),
+      ok = gen_tcp:send(Socket, request(<<"/producer-crash">>, <<"keep-alive">>)),
+      Head = recvUntil(Socket, <<"\r\n\r\n">>, <<>>, 2000),
+      ?assertNotEqual(nomatch, binary:match(Head, <<"HTTP/1.1 200 OK">>)),
+      %% Producer exits without {chunk, close}; connection must not stay stuck in chunkLoop.
+      ?assertEqual({error, closed}, gen_tcp:recv(Socket, 0, 2000))
+   end).
+
 server_closed_stream_can_keep_connection_alive_test() ->
    withServer(tcp, fun(Port) ->
       {ok, Socket} = connect(tcp, Port),
