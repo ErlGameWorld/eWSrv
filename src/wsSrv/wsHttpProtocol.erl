@@ -410,7 +410,33 @@ parsePort(Bin) ->
       _:_ -> error
    end.
 
-parsePath({abs_path, FullPath}) ->
+parsePath({abs_path, FullPath}) when is_binary(FullPath) ->
+   %% decode_packet 已经确认这是 origin-form。常见的 /hello、/api/... 没有
+   %% query/fragment，不需要每次进入通用 uri_string parser 创建 URI map。
+   %% 带 ?/# 的路径仍走原解析器，保持现有语义。
+   case binary:match(FullPath, <<"?">>) of
+      nomatch ->
+         case binary:match(FullPath, <<"#">>) of
+            nomatch ->
+               Path = case FullPath of <<>> -> <<"/">>; _ -> FullPath end,
+               {ok, undefined, undefined, undefined, Path, []};
+            _ ->
+               parseAbsPath(FullPath)
+         end;
+      _ ->
+         parseAbsPath(FullPath)
+   end;
+parsePath({absoluteURI, Scheme, Host, Port, Path}) ->
+   case parsePath({abs_path, Path}) of
+      {ok, _Scheme, _Host, _Port, RetPath, RetQuery} ->
+         {ok, Scheme, Host, Port, RetPath, RetQuery};
+      Error ->
+         Error
+   end;
+parsePath(_) ->
+   {error, unsupported_uri}.
+
+parseAbsPath(FullPath) ->
    try uri_string:parse(FullPath) of
       URIMap ->
          Host = maps:get(host, URIMap, undefined),
@@ -428,13 +454,4 @@ parsePath({abs_path, FullPath}) ->
          {ok, Scheme, Host, Port, Path, Args}
    catch
       _:_ -> {error, invalid_uri}
-   end;
-parsePath({absoluteURI, Scheme, Host, Port, Path}) ->
-   case parsePath({abs_path, Path}) of
-      {ok, _Scheme, _Host, _Port, RetPath, RetQuery} ->
-         {ok, Scheme, Host, Port, RetPath, RetQuery};
-      Error ->
-         Error
-   end;
-parsePath(_) ->
-   {error, unsupported_uri}.
+   end.
