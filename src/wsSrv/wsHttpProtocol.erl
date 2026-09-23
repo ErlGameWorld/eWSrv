@@ -417,16 +417,16 @@ wouldExceed(Current, Add, Max) ->
    Current + Add > Max.
 
 validChunkedEncoding(Value) ->
-   Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
-   %% eWSrv currently implements only the chunked transfer coding.
-   case Tokens of
-      [T] -> wsUtil:headerNameEq(string:trim(T), <<"chunked">>);
-      _ -> false
-   end.
+   %% 只支持单个 chunked coding；直接比较整值即可。逗号存在时自然不匹配，
+   %% 不需要为每个请求构造 binary:split/3 token list。
+   wsUtil:headerNameEq(string:trim(iolist_to_binary(Value)), <<"chunked">>).
 
 parseChunkSize(Line0) ->
    Line = string:trim(Line0),
-   [Hex | _] = binary:split(Line, <<";">>, [global]),
+   Hex = case binary:match(Line, <<";">>) of
+      nomatch -> Line;
+      {Pos, 1} -> binary:part(Line, 0, Pos)
+   end,
    case Hex of
       <<>> -> error;
       _ ->
