@@ -398,10 +398,12 @@ genAcceptKey(Key) ->
 -spec tryWsUpgrade(#wsReq{}) -> {ok, list()} | {error, binary()}.
 tryWsUpgrade(WsReq) ->
    #wsReq{method = Method, version = HttpVersion, headers = Headers} = WsReq,
-   Connection = wsUtil:getHeader('Connection', Headers, undefined),
-   Upgrade = wsUtil:getHeader('Upgrade', Headers, undefined),
-   Version = wsUtil:getHeader(<<"Sec-Websocket-Version">>, Headers, undefined),
-   Key = wsUtil:getHeader(<<"Sec-Websocket-Key">>, Headers, undefined),
+   %% HTTP field-name 大小写不敏感；Sec-WebSocket-* 不是 decode_packet 的
+   %% 固定 atom 表成员，不能依赖客户端恰好使用某一种拼写。
+   Connection = wsHeaderValue('Connection', Headers, undefined),
+   Upgrade = wsHeaderValue('Upgrade', Headers, undefined),
+   Version = wsHeaderValue(<<"Sec-WebSocket-Version">>, Headers, undefined),
+   Key = wsHeaderValue(<<"Sec-WebSocket-Key">>, Headers, undefined),
    case validateConditions(Method, HttpVersion, Connection, Upgrade, Version, Key) of
       ok ->
          AcceptKey = genAcceptKey(Key),
@@ -414,6 +416,24 @@ tryWsUpgrade(WsReq) ->
       Error ->
          Error
    end.
+
+wsHeaderValue(Name, Headers, Default) ->
+   case lists:keyfind(Name, 1, Headers) of
+      {_, Value} ->
+         Value;
+      false ->
+         wsHeaderValueCi(Name, Headers, Default)
+   end.
+
+wsHeaderValueCi(_Name, [], Default) ->
+   Default;
+wsHeaderValueCi(Name, [{Key, Value} | Rest], Default) ->
+   case wsUtil:headerNameEq(Key, Name) of
+      true -> Value;
+      false -> wsHeaderValueCi(Name, Rest, Default)
+   end;
+wsHeaderValueCi(Name, [_ | Rest], Default) ->
+   wsHeaderValueCi(Name, Rest, Default).
 
 validateConditions(Method, HttpVersion, Connection, Upgrade, Version, Key) ->
    maybe
