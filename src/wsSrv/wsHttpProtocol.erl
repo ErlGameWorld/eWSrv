@@ -21,7 +21,8 @@ request(reqLine, Data0, Socket, State) ->
          {err_code, 414};
       {more, _} ->
          {ok, State#wsState{buffer = Data}};
-      {ok, {http_request, Method, RawPath, Version}, Rest} ->
+      {ok, {http_request, Method0, RawPath, Version}, Rest} ->
+         Method = normalizeMethod(Method0),
          ReqLineSize = byte_size(Data) - byte_size(Rest),
          case ReqLineSize > Max of
             true ->
@@ -445,10 +446,22 @@ parsePort(Bin) ->
       _:_ -> error
    end.
 
+normalizeMethod(<<"CONNECT">>) -> 'CONNECT';
+normalizeMethod(<<"PATCH">>) -> 'PATCH';
+normalizeMethod(Method) -> Method.
+
 parseRequestTarget('OPTIONS', '*') ->
    {ok, undefined, undefined, undefined, <<"*">>, []};
 parseRequestTarget(_Method, '*') ->
    {error, invalid_request_target};
+parseRequestTarget('CONNECT', {scheme, Host, PortBin})
+   when is_binary(Host), is_binary(PortBin), Host =/= <<>> ->
+   case parsePort(PortBin) of
+      {ok, Port} ->
+         {ok, undefined, Host, Port, <<Host/binary, ":", PortBin/binary>>, []};
+      error ->
+         {error, invalid_connect_target}
+   end;
 parseRequestTarget('CONNECT', Target) when is_binary(Target) ->
    case parseHostHeader(Target, undefined) of
       {Host, Port} when is_integer(Port) ->
