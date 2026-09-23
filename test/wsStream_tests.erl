@@ -44,7 +44,8 @@ pipeline_arriving_during_stream_is_processed_after_stream_test() ->
       {ok, Socket} = connect(tcp, Port),
       ok = gen_tcp:send(Socket, request(<<"/delayed-finite">>, <<"keep-alive">>)),
       FirstHead = recvUntil(Socket, <<"\r\n\r\n">>, <<>>, 2000),
-      ?assertNotEqual(nomatch, binary:match(FirstHead, <<"transfer-encoding: chunked">>)),
+      ?assertNotEqual(nomatch,
+         binary:match(wsUtil:toLowerStr(FirstHead), <<"transfer-encoding: chunked">>)),
       %% Send the next request while the first response is still streaming.
       ok = gen_tcp:send(Socket, request(<<"/hello">>, <<"close">>)),
       Tail = recvUntil(Socket, <<"hello">>, <<>>, 2000),
