@@ -14,6 +14,7 @@
    , handleStreamStart/7
    , handleStreamChunk/6
    , handleStreamClose/4
+   , resumePending/1
    , hasOpenStreams/1
    , idleClose/1
    , terminate/1
@@ -71,6 +72,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout, MaxConcurrent, Re
       tx_hpack => wsHpack:new(),
       streams => #{},
       send_pending_streams => #{},
+      flush_scheduled => false,
       header_frames => none,
       last_client_stream => 0,
       need_client_settings => true,
@@ -1449,6 +1451,9 @@ normalizeResponseHeaders([{Name0, Value0} | Rest], Acc) ->
          end
    end.
 
+resumePending(State) ->
+   flushAllPending(State#{flush_scheduled => false}).
+
 flushAllPending(State0) ->
    %% Connection WINDOW_UPDATE / peer SETTINGS only need to revisit streams
    %% that actually have buffered DATA/file bytes waiting for send credit.
@@ -1518,9 +1523,9 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
                   <<>> when EndStream ->
                      case fileRemaining(Stream1) of
                         Left when Left > 0 ->
-                           %% 大文件按 read-buffer 为粒度刷新 inactivity timer，
-                           %% 而不是每个 DATA frame 都 cancel/send_after。
-                           flushPending(StreamId, touchStreamTimer(StreamId, State1));
+                           %% 一轮最多推进一个 SEND_BATCH_BYTES 文件块，然后
+                           %% 让出 connection owner；避免单个大文件独占 H2。
+                           {ok, scheduleFlush(touchStreamTimer(StreamId, State1))};
                         _ ->
                            completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
                            {ok, dropStream(StreamId, State1)}
@@ -1535,10 +1540,18 @@ flushPendingLoop(StreamId, Pending, State0, SentAny) ->
                      }}},
                      {ok, clearSendPending(StreamId, touchStreamTimer(StreamId, State2))};
                   _ ->
-                     flushPendingLoop(StreamId, Rest, State1, true)
+                     %% pending_send 仍有数据时不要在当前 mailbox turn 递归
+                     %% 吃完整个大响应。保留 pending 状态并合并调度下一轮。
+                     {ok, scheduleFlush(State1)}
                end
          end
    end.
+
+scheduleFlush(#{flush_scheduled := true} = State) ->
+   State;
+scheduleFlush(State) ->
+   self() ! h2_flush_pending,
+   State#{flush_scheduled => true}.
 
 stripHeadersPayload(Flags, StreamId, Payload0) ->
    case stripPadding(Flags, Payload0) of
