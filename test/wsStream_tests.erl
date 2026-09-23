@@ -39,6 +39,21 @@ server_closed_stream_can_keep_connection_alive_test() ->
       gen_tcp:close(Socket)
    end).
 
+pipeline_arriving_during_stream_is_processed_after_stream_test() ->
+   withServer(tcp, fun(Port) ->
+      {ok, Socket} = connect(tcp, Port),
+      ok = gen_tcp:send(Socket, request(<<"/delayed-finite">>, <<"keep-alive">>)),
+      FirstHead = recvUntil(Socket, <<"\r\n\r\n">>, <<>>, 2000),
+      ?assertNotEqual(nomatch, binary:match(FirstHead, <<"transfer-encoding: chunked">>)),
+      %% Send the next request while the first response is still streaming.
+      ok = gen_tcp:send(Socket, request(<<"/hello">>, <<"close">>)),
+      Tail = recvUntil(Socket, <<"hello">>, <<>>, 2000),
+      All = <<FirstHead/binary, Tail/binary>>,
+      ?assertNotEqual(nomatch, binary:match(All, <<"done">>)),
+      ?assertEqual(2, length(binary:matches(All, <<"HTTP/1.1 200 OK">>))),
+      gen_tcp:close(Socket)
+   end).
+
 withServer(Transport, Test) ->
    flushMailbox(),
    true = register(ws_stream_test_owner, self()),
