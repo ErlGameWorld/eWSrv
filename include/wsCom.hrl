@@ -31,6 +31,8 @@
 -define(DefMaxWsMessageSize, 8 * 1024 * 1024).
 -define(DefRequestTimeout, 30000).
 -define(DefKeepAliveTimeout, 60000).
+-define(DefHttp2MaxConcurrentStreams, 100).
+-define(DefHttp2ReceiveWindow, 65535).
 
 -define(CASE(Cond, Then, That), case Cond of true -> Then; _ -> That end).
 
@@ -75,6 +77,8 @@
    , keepAliveTimeout = ?DefKeepAliveTimeout :: pos_integer()       %% 空闲Keep-Alive超时
    , requestStartedAt :: undefined | integer()                      %% 当前HTTP请求开始时间(monotonic ms)
    , http2Enabled = true :: boolean()                               %% 是否启用HTTP/2
+   , http2MaxConcurrentStreams = ?DefHttp2MaxConcurrentStreams :: pos_integer()
+   , http2ReceiveWindow = ?DefHttp2ReceiveWindow :: 65535..2147483647
    , protocol = detect :: detect | http1 | http2                    %% 当前连接线协议
    , h2State :: undefined | map()                                   %% HTTP/2连接状态
 
