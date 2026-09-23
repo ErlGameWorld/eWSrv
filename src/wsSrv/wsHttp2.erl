@@ -1566,8 +1566,15 @@ parseHeaderList([{Name0, Value0} | Rest], Pseudo, Regular, Phase, Seen) ->
                      end;
                   _ ->
                      case validRegularHeader(Name, Value) of
-                        false -> {error, {bad_header, Name}};
-                        true -> parseHeaderList(Rest, Pseudo, [{Name, Value} | Regular], regular, Seen)
+                        false ->
+                           {error, {bad_header, Name}};
+                        true ->
+                           case noteRequestHeader(Name, Value, Seen) of
+                              {ok, Seen1} ->
+                                 parseHeaderList(Rest, Pseudo, [{Name, Value} | Regular], regular, Seen1);
+                              {error, _} = Error ->
+                                 Error
+                           end
                      end
                end
          end
@@ -1613,45 +1620,68 @@ isHopByHop(<<"transfer-encoding">>) -> true;
 isHopByHop(<<"upgrade">>) -> true;
 isHopByHop(_) -> false.
 
-buildRequest(<<"CONNECT">>, Pseudo, Regular, _Seen, State) ->
+%% 正常 header 在 parseHeaderList/5 本来就必须逐项走一遍。这里顺手记录
+%% 后续构造请求必需的元数据，避免再为 Host / Content-Length 扫描 Regular。
+noteRequestHeader(<<"host">>, Value, Seen) ->
+   Hosts = maps:get(host_values, Seen, []),
+   {ok, Seen#{host_values => [Value | Hosts]}};
+noteRequestHeader(<<"content-length">>, Value, Seen) ->
+   case parseContentLengthValue(Value) of
+      N when is_integer(N) ->
+         case maps:get(content_length, Seen, undefined) of
+            undefined -> {ok, Seen#{content_length => N}};
+            N -> {ok, Seen};
+            _Other -> {error, conflicting_content_length}
+         end;
+      _ ->
+         {error, invalid_content_length}
+   end;
+noteRequestHeader(_Name, _Value, Seen) ->
+   {ok, Seen}.
+
+buildRequest(<<"CONNECT">>, Pseudo, Regular, Seen, State) ->
    case {maps:get(<<":authority">>, Pseudo, undefined),
          maps:get(<<":scheme">>, Pseudo, undefined),
          maps:get(<<":path">>, Pseudo, undefined)} of
       {undefined, _, _} -> {error, missing_authority};
       {_Authority, undefined, undefined} ->
-         makeRequest(<<"CONNECT">>, Pseudo, Regular, State);
+         makeRequest(<<"CONNECT">>, Pseudo, Regular, Seen, State);
       _ -> {error, bad_connect_pseudo_headers}
    end;
-buildRequest(MethodBin, Pseudo, Regular, _Seen, State) ->
+buildRequest(MethodBin, Pseudo, Regular, Seen, State) ->
    case {maps:get(<<":scheme">>, Pseudo, undefined), maps:get(<<":path">>, Pseudo, undefined)} of
       {undefined, _} -> {error, missing_scheme};
       {_, undefined} -> {error, missing_path};
       {_Scheme, <<>>} -> {error, empty_path};
       {_Scheme, <<"*">>} when MethodBin =:= <<"OPTIONS">> ->
-         makeRequest(MethodBin, Pseudo, Regular, State);
+         makeRequest(MethodBin, Pseudo, Regular, Seen, State);
       {_Scheme, <<"*">>} ->
          {error, asterisk_path_requires_options};
       {_Scheme, <<"/", _/binary>>} ->
-         makeRequest(MethodBin, Pseudo, Regular, State);
+         makeRequest(MethodBin, Pseudo, Regular, Seen, State);
       _ ->
          {error, invalid_path}
    end.
 
-makeRequest(MethodBin, Pseudo, Regular, State) ->
+makeRequest(MethodBin, Pseudo, Regular, Seen, State) ->
    PathQuery = maps:get(<<":path">>, Pseudo, <<>>),
    {Path, Args} = splitPathQuery(PathQuery),
    SchemeBin = maps:get(<<":scheme">>, Pseudo,
       case maps:get(scheme, State) of https -> <<"https">>; _ -> <<"http">> end),
    Authority = maps:get(<<":authority">>, Pseudo, undefined),
-   HostHeaders = [V || {<<"host">>, V} <- Regular],
+   HostHeaders = maps:get(host_values, Seen, []),
    case validateAuthority(Authority, HostHeaders, SchemeBin) of
       {error, _} = Error ->
          Error;
       {ok, Host, Port} ->
-         CompatHeaders = ensureHostHeader(Regular, Authority),
-         ContentLength = parseContentLengthHeaders(CompatHeaders),
+         CompatHeaders =
+            case {Authority, HostHeaders} of
+               {undefined, _} -> Regular;
+               {_Auth, []} -> [{<<"host">>, Authority} | Regular];
+               {_Auth, _} -> Regular
+            end,
+         ContentLength = maps:get(content_length, Seen, undefined),
          case ContentLength of
-            {error, _} = Error -> Error;
             N when is_integer(N) ->
                case exceeds(N, maps:get(max_body, State)) of
                   true -> {error, body_too_large};
@@ -1660,14 +1690,6 @@ makeRequest(MethodBin, Pseudo, Regular, State) ->
             undefined ->
                makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, CompatHeaders, undefined, State)
          end
-   end.
-
-ensureHostHeader(Regular, undefined) ->
-   Regular;
-ensureHostHeader(Regular, Authority) ->
-   case lists:keyfind(<<"host">>, 1, Regular) of
-      false -> [{<<"host">>, Authority} | Regular];
-      _ -> Regular
    end.
 
 validMethod(<<>>) -> false;
@@ -1795,25 +1817,6 @@ parsePort(P) ->
 defaultPort(<<"https">>) -> 443;
 defaultPort(<<"http">>) -> 80;
 defaultPort(_) -> undefined.
-
-parseContentLengthHeaders(Headers) ->
-   parseContentLengthHeaders(Headers, undefined).
-
-parseContentLengthHeaders([], Seen) ->
-   Seen;
-parseContentLengthHeaders([{<<"content-length">>, Value} | Rest], undefined) ->
-   case parseContentLengthValue(Value) of
-      N when is_integer(N) -> parseContentLengthHeaders(Rest, N);
-      _ -> {error, invalid_content_length}
-   end;
-parseContentLengthHeaders([{<<"content-length">>, Value} | Rest], Seen) ->
-   case parseContentLengthValue(Value) of
-      Seen -> parseContentLengthHeaders(Rest, Seen);
-      N when is_integer(N) -> {error, conflicting_content_length};
-      _ -> {error, invalid_content_length}
-   end;
-parseContentLengthHeaders([_ | Rest], Seen) ->
-   parseContentLengthHeaders(Rest, Seen).
 
 parseContentLengthValue(Value) when is_binary(Value), Value =/= <<>>, byte_size(Value) =< 20 ->
    case allDecimalDigits(Value) of
