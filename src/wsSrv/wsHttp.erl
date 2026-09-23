@@ -667,22 +667,47 @@ doHandle(State) ->
          {response, HttpCode, [], Body};
       %% Unexpected
       Unexpected ->
-         ?wsErr("handle return error WsReq:~p Ret:~p~n", [WsReq, Unexpected]),
+         ?wsErr("handle return error Req:~p RetShape:~p~n",
+            [requestLogInfo(WsReq), returnShape(Unexpected)]),
          {response, 500, [], <<"Internal server error">>}
    catch
       throw:{ResponseCode, Headers, Body}
          when is_integer(ResponseCode), ResponseCode >= 200, ResponseCode =< 999 ->
          {response, ResponseCode, Headers, Body};
       throw:Exc:Stacktrace ->
-         ?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
+         ?wsErr("handle catch throw Req:~p R:~P S:~P~n",
+            [requestLogInfo(WsReq), Exc, 8, Stacktrace, 12]),
          {response, 500, [], <<"Internal server error">>};
       error:Error:Stacktrace ->
-         ?wsErr("handle catch error WsReq:~p R:~p S:~p~n", [WsReq, Error, Stacktrace]),
+         ?wsErr("handle catch error Req:~p R:~P S:~P~n",
+            [requestLogInfo(WsReq), Error, 8, Stacktrace, 12]),
          {response, 500, [], <<"Internal server error">>};
       exit:Exit:Stacktrace ->
-         ?wsErr("handle catch exit WsReq:~p R:~p S:~p~n", [WsReq, Exit, Stacktrace]),
+         ?wsErr("handle catch exit Req:~p R:~P S:~P~n",
+            [requestLogInfo(WsReq), Exit, 8, Stacktrace, 12]),
          {response, 500, [], <<"Internal server error">>}
    end.
+
+%% 异常日志不能把几 MB request body / 巨型 handler 返回值完整格式化。
+%% 只保留定位问题需要的元数据，避免错误风暴反过来放大 CPU/内存/日志 IO。
+requestLogInfo(#wsReq{method = Method, path = Path, version = Version, headers = Headers, body = Body}) ->
+   {Method, Path, Version, length(Headers), safeBodySize(Body)}.
+
+safeBodySize(Body) ->
+   try iolist_size(Body) catch _:_ -> unknown end.
+
+returnShape(Term) when is_binary(Term) -> {binary, byte_size(Term)};
+returnShape(Term) when is_list(Term) -> list;
+returnShape(Term) when is_map(Term) -> {map, map_size(Term)};
+returnShape(Term) when is_tuple(Term), tuple_size(Term) > 0 ->
+   case element(1, Term) of
+      Tag when is_atom(Tag) -> {tuple, tuple_size(Term), Tag};
+      _ -> {tuple, tuple_size(Term)}
+   end;
+returnShape(Term) when is_atom(Term) -> Term;
+returnShape(Term) when is_integer(Term) -> integer;
+returnShape(Term) when is_float(Term) -> float;
+returnShape(_) -> other.
 
 %% Inject compression for normal responses.
 %% 用户响应头只扫描一次，完成规范化、安全校验、框架自管头剔除和Connection语义提取。
