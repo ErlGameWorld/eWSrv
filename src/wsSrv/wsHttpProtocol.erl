@@ -494,9 +494,10 @@ parsePath({abs_path, FullPath}) when is_binary(FullPath) ->
                end
          end
    end;
-parsePath({absoluteURI, Scheme, Host, Port, Path}) ->
+parsePath({absoluteURI, Scheme, Host, Port0, Path}) ->
    case parsePath({abs_path, Path}) of
       {ok, _Scheme, _Host, _Port, RetPath, RetQuery} ->
+         Port = case Port0 of undefined -> defaultPort(Scheme); _ -> Port0 end,
          {ok, Scheme, Host, Port, RetPath, RetQuery};
       Error ->
          Error
