@@ -264,16 +264,29 @@ addDyn(Name, Value, Ctx = #ctx{dyn = Dyn, size = Size, max = Max}) ->
    end.
 
 evict(Dyn, Size, Max) when Size > Max ->
-   %% 只 reverse 一次，再从最旧端连续逐出（避免每条都 reverse）
-   evictOldest(lists:reverse(Dyn), Size, Max);
+   %% dyn 按新->旧排列。旧实现为了从尾部逐出会 reverse 两次；
+   %% 动态表稳定在容量上限后几乎每次 addDyn 都会触发这条路径。
+   %% 这里递归到尾部后只重建保留下来的前缀一次，减少整表临时列表分配。
+   NeedRemove = Size - Max,
+   {Kept, Removed} = evictOldestBytes(Dyn, NeedRemove),
+   {Kept, Size - Removed};
 evict(Dyn, Size, _Max) ->
    {Dyn, Size}.
 
-evictOldest(OldestFirst, Size, Max) when Size > Max ->
-   [{N, V} | Rest] = OldestFirst,
-   evictOldest(Rest, Size - (byte_size(N) + byte_size(V) + ?EntryOverhead), Max);
-evictOldest(OldestFirst, Size, _Max) ->
-   {lists:reverse(OldestFirst), Size}.
+evictOldestBytes(Dyn, NeedRemove) ->
+   evictOldestBytes(Dyn, NeedRemove, 0).
+
+evictOldestBytes([], _NeedRemove, Removed) ->
+   {[], Removed};
+evictOldestBytes([{N, V} = Entry | Rest], NeedRemove, Removed0) ->
+   {KeptRest, Removed1} = evictOldestBytes(Rest, NeedRemove, Removed0),
+   case Removed1 >= NeedRemove of
+      true ->
+         {[Entry | KeptRest], Removed1};
+      false ->
+         EntrySize = byte_size(N) + byte_size(V) + ?EntryOverhead,
+         {KeptRest, Removed1 + EntrySize}
+   end.
 
 %%====================================================================
 %% 解码
