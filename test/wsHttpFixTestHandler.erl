@@ -44,6 +44,10 @@ handle('GET', <<"/unsafe-headers">>, _Req) ->
       {<<"X-Bad\r\nX-Injected">>, <<"yes">>},
       {<<"X-Value">>, <<"ok\r\nX-Injected: yes">>}
    ], <<"safe">>};
+handle('GET', <<"/informational-final">>, _Req) ->
+   %% Handler API returns one final response only. 1xx requires a separate
+   %% informational-response API, so this shape must be rejected by the engine.
+   {103, [{<<"Link">>, <<"</style.css>; rel=preload">>}], <<"must-not-be-final">>};
 handle('GET', <<"/bad-status">>, _Req) ->
    %% 故意的非法形状：首元素本该是整数状态码，这里塞了一个带 CRLF 的二进制。
    %% 服务器必须拒绝它、落到 500，并打一条 ERROR 级 "handle return error"
