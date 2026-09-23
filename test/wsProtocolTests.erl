@@ -129,10 +129,13 @@ chunked_trailers_are_exposed_to_handler_test() ->
       "X-Checksum: ok\r\n\r\n"
    >>,
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true}),
-   Headers = (State#wsState.wsReq)#wsReq.headers,
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(false, lists:any(fun({K, _}) ->
+      wsUtil:headerNameEq(K, <<"X-Checksum">>)
+   end, WsReq#wsReq.headers)),
    ?assert(lists:any(fun({K, V}) ->
       wsUtil:headerNameEq(K, <<"X-Checksum">>) andalso V =:= <<"ok">>
-   end, Headers)).
+   end, WsReq#wsReq.trailers)).
 
 chunked_forbidden_trailer_is_rejected_test() ->
    Req = <<
