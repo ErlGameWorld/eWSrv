@@ -36,6 +36,7 @@
    , headersFrames/3
    , headersFrames/4
    , dataFrames/3
+   , dataFrames/4
    , splitPayload/2
    , goawayFields/1
    , pingData/1
@@ -210,15 +211,25 @@ continuationFrames([Chunk | Rest], StreamId) ->
 %% @param Body 消息体
 %% @param MaxFrame 每帧负载上限
 -spec dataFrames(Body, StreamId, MaxFrame) -> iodata() when Body :: binary(), StreamId :: pos_integer(), MaxFrame :: pos_integer().
-dataFrames(<<>>, StreamId, _MaxFrame) ->
-   frame(data, StreamId, <<>>, ?FLAG_END_STREAM);
 dataFrames(Body, StreamId, MaxFrame) ->
-   dataFramesLoop(Body, StreamId, MaxFrame).
+   dataFrames(Body, StreamId, MaxFrame, true).
 
-dataFramesLoop(Bin, StreamId, MaxFrame) when byte_size(Bin) =< MaxFrame ->
-   frame(data, StreamId, Bin, ?FLAG_END_STREAM);
-dataFramesLoop(<<Chunk:MaxFrame/binary, Rest/binary>>, StreamId, MaxFrame) ->
-   [frame(data, StreamId, Chunk, 0) | dataFramesLoop(Rest, StreamId, MaxFrame)].
+%% @doc 与 dataFrames/3 相同，但调用方可控制最后一帧是否带 END_STREAM。
+%% 用于 flow-control burst：一个 socket send 可以携带多帧，同时保持 stream 打开。
+-spec dataFrames(Body, StreamId, MaxFrame, EndStream) -> iodata()
+   when Body :: binary(), StreamId :: pos_integer(), MaxFrame :: pos_integer(), EndStream :: boolean().
+dataFrames(<<>>, StreamId, _MaxFrame, true) ->
+   frame(data, StreamId, <<>>, ?FLAG_END_STREAM);
+dataFrames(<<>>, _StreamId, _MaxFrame, false) ->
+   [];
+dataFrames(Body, StreamId, MaxFrame, EndStream) ->
+   dataFramesLoop(Body, StreamId, MaxFrame, EndStream).
+
+dataFramesLoop(Bin, StreamId, MaxFrame, EndStream) when byte_size(Bin) =< MaxFrame ->
+   Flags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
+   frame(data, StreamId, Bin, Flags);
+dataFramesLoop(<<Chunk:MaxFrame/binary, Rest/binary>>, StreamId, MaxFrame, EndStream) ->
+   [frame(data, StreamId, Chunk, 0) | dataFramesLoop(Rest, StreamId, MaxFrame, EndStream)].
 
 %% 把 binary 切成不超过 Max 字节的若干块（输入为空时才得到空列表）。
 -spec splitPayload(binary(), pos_integer()) -> [binary()].
