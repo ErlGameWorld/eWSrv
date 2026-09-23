@@ -33,6 +33,11 @@
 
 本轮静态审计后，没有确认仍未修复的 P0 级问题。
 
+本轮曾发现并已修复一个**优化分支自身的 P0**：
+
+- `wsHttp:startHttp2/2` 已开始调用 `wsHttp2:new/8`，但 `wsHttp2` 当时仍只实现/export `new/6`，会导致当前优化分支无法编译。
+- 已补齐 `new/8`，保留 `new/6` 兼容入口，并把 `http2MaxConcurrentStreams/http2ReceiveWindow` 真正接入 H2 状态机。
+
 已有代码本身已具备的重要防护包括：
 
 - HTTP/1 Content-Length 冲突检查
@@ -159,6 +164,9 @@
 - 单帧 HEADERS 已知 HPACK block 长度后直接构造 frame header，不再二次 `iolist_size/1`。
 - `http2MaxConcurrentStreams` 同时用于 SETTINGS 广播和本地 stream admission enforcement。
 - `http2ReceiveWindow` 同时覆盖 stream/connection 两级接收窗口。
+- H2 文件读取 buffer 固定受 `SEND_BATCH_BYTES=256KB` 控制，不再随 peer `SETTINGS_MAX_FRAME_SIZE` 放大到数 MB/十几 MB。
+- 大 DATA/file stream 每轮最多推进一个 256KB batch；剩余数据通过合并的 `h2_flush_pending` mailbox 消息继续，避免单个大流在大 flow-control window 下长时间独占 connection owner。
+- `flush_scheduled` 合并继续发送通知，防止为了公平性又制造 self-message 风暴。
 
 ### 3.5 HPACK / Huffman
 
@@ -215,7 +223,7 @@ Huffman：
 | 文件下载 | H1 sendfile prepared headers、H2 file buffer + pending stream flush |
 | chunk/stream | H1 mailbox backpressure、H2 pending stream set |
 | gzip/deflate | Accept-Encoding 单遍解析 |
-| H2 高并发 streams | sparse credit、send-pending set、header accounting |
+| H2 高并发 streams | sparse credit、send-pending set、header accounting、256KB 公平调度 batch |
 | WebSocket 小消息 | 握手与状态机保持轻量 |
 | WebSocket 大消息 | unmask 分配减少、发送 payload 零额外整帧复制 |
 | TLS | 上述 H1/H2/WS 数据路径同样复用 |
@@ -268,6 +276,7 @@ rebar3 eunit
 - H2 normalized HPACK fast path
 - H2 streaming response header-list limit
 - H2 configurable stream/connection receive window + max concurrent SETTINGS
+- H2 大响应在 256KB batch 间让出 connection owner，验证小 stream 能在 1MB stream END_STREAM 前拿到 DATA
 - stream 期间到达 pipeline request
 - 原有 H2 flow-control / reset / timeout / streaming 回归
 
