@@ -40,6 +40,9 @@ spell_headers_accepts_atom_keys_test() ->
 expect_100_continue_test_() ->
    {timeout, 10, fun expect100Continue/0}.
 
+unsupported_expectation_returns_417_test_() ->
+   {timeout, 10, fun unsupportedExpectation417/0}.
+
 expect100Continue() ->
    withServer(fun(Port) ->
       {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
@@ -57,6 +60,22 @@ expect100Continue() ->
       {ok, Resp} = gen_tcp:recv(Sock, 0, 2000),
       ?assertMatch(<<"HTTP/1.1 200", _/binary>>, Resp),
       ?assert(binary:match(Resp, <<"hello">>) =/= nomatch),
+      gen_tcp:close(Sock)
+   end).
+
+unsupportedExpectation417() ->
+   withServer(fun(Port) ->
+      {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
+         [binary, {packet, raw}, {active, false}], 2000),
+      ok = gen_tcp:send(Sock, [
+         <<"POST /echo HTTP/1.1\r\n">>,
+         <<"Host: 127.0.0.1\r\n">>,
+         <<"Content-Length: 5\r\n">>,
+         <<"Expect: fancy-feature\r\n">>,
+         <<"\r\n">>
+      ]),
+      {ok, Bin} = recvAll(Sock, <<>>, 3000),
+      ?assertMatch(<<"HTTP/1.1 417", _/binary>>, Bin),
       gen_tcp:close(Sock)
    end).
 
