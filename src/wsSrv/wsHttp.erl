@@ -630,17 +630,17 @@ doHandle(State) ->
       {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, WsReq, Headers);
       %% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
       {HttpCode, Headers, {file, Filename}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, []};
       {HttpCode, Headers, {file, Filename, Range}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {file, HttpCode, Headers, Filename, Range};
       %% Simple
       {HttpCode, Headers, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {response, HttpCode, Headers, Body};
       {HttpCode, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
+         when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
          {response, HttpCode, [], Body};
       %% Unexpected
       Unexpected ->
@@ -648,7 +648,7 @@ doHandle(State) ->
          {response, 500, [], <<"Internal server error">>}
    catch
       throw:{ResponseCode, Headers, Body}
-         when is_integer(ResponseCode), ResponseCode >= 100, ResponseCode =< 999 ->
+         when is_integer(ResponseCode), ResponseCode >= 200, ResponseCode =< 999 ->
          {response, ResponseCode, Headers, Body};
       throw:Exc:Stacktrace ->
          ?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
@@ -789,6 +789,8 @@ sendWireResponse(Socket, Response) ->
    end.
 
 responseBody('HEAD', _Code, _UserBody) ->
+   <<>>;
+responseBody(_Method, Code, _UserBody) when Code >= 100, Code < 200 ->
    <<>>;
 responseBody(_Method, 304, _UserBody) ->
    <<>>;
