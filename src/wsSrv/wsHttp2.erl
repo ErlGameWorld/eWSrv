@@ -77,6 +77,7 @@ new(Socket, WsMod, Scheme, MaxBody, MaxHeader, RequestTimeout) ->
       max_concurrent_streams => ?DEFAULT_MAX_STREAMS,
       goaway => false,
       pending_conn_credit => 0,
+      pending_stream_credits => #{},
       wu_conn_pending => 0,
       rapid_resets => 0,
       rapid_reset_ts => 0,
@@ -832,14 +833,9 @@ restoreWuPending(StreamId, StreamPending, ConnPending, State0) ->
 addStreamRecvCredit(_StreamId, 0, State) ->
    State;
 addStreamRecvCredit(StreamId, Credit, State) ->
-   Streams = maps:get(streams, State),
-   case maps:get(StreamId, Streams, undefined) of
-      undefined ->
-         State;
-      Stream ->
-         Pending = maps:get(pending_recv_credit, Stream, 0) + Credit,
-         State#{streams => Streams#{StreamId := Stream#{pending_recv_credit => Pending}}}
-   end.
+   Credits0 = maps:get(pending_stream_credits, State, #{}),
+   Pending = maps:get(StreamId, Credits0, 0) + Credit,
+   State#{pending_stream_credits => Credits0#{StreamId => Pending}}.
 
 %% 本批 recv 里已经宣布给对端的窗口，要等这批帧全部校验完再加回本地计数。
 queueConnCredit(FlowBytes, State) ->
@@ -847,11 +843,26 @@ queueConnCredit(FlowBytes, State) ->
 
 applyRecvCredit(State0) ->
    Conn = maps:get(recv_conn_window, State0) + maps:get(pending_conn_credit, State0, 0),
-   Streams = maps:map(fun(_Id, Stream) ->
-      Credit = maps:get(pending_recv_credit, Stream, 0),
-      Stream#{recv_window => maps:get(recv_window, Stream, ?DEFAULT_WINDOW) + Credit, pending_recv_credit => 0}
-   end, maps:get(streams, State0)),
-   State0#{recv_conn_window => Conn, pending_conn_credit => 0, streams => Streams}.
+   Credits = maps:get(pending_stream_credits, State0, #{}),
+   Streams0 = maps:get(streams, State0),
+   %% 只更新本批真正收到 WINDOW_UPDATE credit 的 stream；旧实现 maps:map
+   %% 每个 recv batch 都扫描所有打开 stream，高并发 multiplexing 下是 O(N) 固定成本。
+   Streams = maps:fold(fun(StreamId, Credit, Acc) ->
+      case maps:get(StreamId, Acc, undefined) of
+         undefined ->
+            Acc;
+         Stream ->
+            Acc#{StreamId := Stream#{
+               recv_window => maps:get(recv_window, Stream, ?DEFAULT_WINDOW) + Credit
+            }}
+      end
+   end, Streams0, Credits),
+   State0#{
+      recv_conn_window => Conn,
+      pending_conn_credit => 0,
+      pending_stream_credits => #{},
+      streams => Streams
+   }.
 
 validateRequestLength(Stream) ->
    ContentLength = maps:get(content_length, Stream, undefined),
@@ -1363,22 +1374,26 @@ flushPending(StreamId, State0) ->
                   Stream1 ->
                      case maps:get(pending_send, Stream1, <<>>) of
                         <<>> -> maybeFinishStream(StreamId, State1);
-                        Bin -> flushPendingLoop(StreamId, Bin, State1)
+                        Bin -> flushPendingLoop(StreamId, Bin, State1, false)
                      end
                end
          end
    end.
 
-flushPendingLoop(StreamId, Pending, State0) ->
+flushPendingLoop(StreamId, Pending, State0, SentAny) ->
    Streams = maps:get(streams, State0),
    Stream = maps:get(StreamId, Streams),
    ConnWin = maps:get(send_conn_window, State0),
    StreamWin = maps:get(send_window, Stream),
    MaxFrame = maps:get(peer_max_frame, State0),
-   Allowed = erlang:max(0, lists:min([byte_size(Pending), ConnWin, StreamWin, MaxFrame])),
+   MinWindow = erlang:min(ConnWin, StreamWin),
+   Allowed = erlang:max(0, erlang:min(byte_size(Pending), erlang:min(MinWindow, MaxFrame))),
    case Allowed of
       0 ->
-         {ok, State0};
+         case SentAny of
+            true -> {ok, touchStreamTimer(StreamId, State0)};
+            false -> {ok, State0}
+         end;
       N ->
          <<Chunk:N/binary, Rest/binary>> = Pending,
          EndStream = maps:get(pending_end_stream, Stream, true),
@@ -1397,15 +1412,17 @@ flushPendingLoop(StreamId, Pending, State0) ->
                {error, internal_error, {socket_error, Reason}};
             ok ->
                Stream1 = Stream#{send_window => StreamWin - N, pending_send => Rest},
-               State1 = touchStreamTimer(StreamId, State0#{
+               State1 = State0#{
                   send_conn_window => ConnWin - N,
                   streams => Streams#{StreamId := Stream1}
-               }),
+               },
                case Rest of
                   <<>> when EndStream ->
-                     case fileRemaining(maps:get(StreamId, maps:get(streams, State1))) of
+                     case fileRemaining(Stream1) of
                         Left when Left > 0 ->
-                           flushPending(StreamId, State1);
+                           %% 大文件按 read-buffer 为粒度刷新 inactivity timer，
+                           %% 而不是每个 16KB DATA frame 都 cancel/send_after。
+                           flushPending(StreamId, touchStreamTimer(StreamId, State1));
                         _ ->
                            completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
                            {ok, dropStream(StreamId, State1)}
@@ -1414,12 +1431,13 @@ flushPendingLoop(StreamId, Pending, State0) ->
                      completePendingAck(maps:get(pending_ack, Stream1, undefined), ok),
                      Streams1 = maps:get(streams, State1),
                      Stream2 = maps:get(StreamId, Streams1),
-                     {ok, State1#{streams => Streams1#{StreamId := Stream2#{
+                     State2 = State1#{streams => Streams1#{StreamId := Stream2#{
                         pending_ack => undefined,
                         pending_end_stream => false
-                     }}}};
+                     }}},
+                     {ok, touchStreamTimer(StreamId, State2)};
                   _ ->
-                     flushPendingLoop(StreamId, Rest, State1)
+                     flushPendingLoop(StreamId, Rest, State1, true)
                end
          end
    end.
