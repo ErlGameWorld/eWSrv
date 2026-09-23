@@ -26,6 +26,16 @@ hpack_roundtrip_test() ->
    {ok, Decoded, _Rx} = wsHpack:decode(iolist_to_binary(Encoded), wsHpack:new()),
    ?assertEqual(Headers, Decoded).
 
+hpack_lowercase_fast_path_roundtrip_test() ->
+   Headers = [
+      {<<":status">>, <<"200">>},
+      {<<"content-type">>, <<"text/plain">>},
+      {<<"cache-control">>, <<"no-store">>}
+   ],
+   {Encoded, _Tx} = wsHpack:encodeLower(Headers, wsHpack:new()),
+   {ok, Decoded, _Rx} = wsHpack:decode(iolist_to_binary(Encoded), wsHpack:new()),
+   ?assertEqual(Headers, Decoded).
+
 huffman_roundtrip_test() ->
    Bin = <<"www.example.com: gzip, deflate; hello HTTP/2">>,
    Encoded = wsHuffman:encode(Bin),
@@ -39,6 +49,12 @@ frame_split_roundtrip_test() ->
    ?assertEqual(Payload, Data),
    {frame, data, LastFlags, 1, _} = lists:last(Parsed),
    ?assert(LastFlags band ?END_STREAM =/= 0).
+
+frame_accepts_nested_iodata_without_semantic_change_test() ->
+   Wire = wsHttp2Frame:frame(data, 3, [<<"ab">>, [<<"cd">>, "ef"]], 0),
+   {_Parser, [{frame, data, 0, 3, Payload}]} =
+      wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Wire)),
+   ?assertEqual(<<"abcdef">>, Payload).
 
 http2_prior_knowledge_integration_test_() ->
    {timeout, 20, fun priorKnowledge/0}.
