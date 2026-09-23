@@ -1565,7 +1565,9 @@ parseHeaderList([{Name0, Value0} | Rest], Pseudo, Regular, Phase, Seen) ->
                         true -> parseHeaderList(Rest, Pseudo#{Name => Value}, Regular, pseudo, Seen#{Name => true})
                      end;
                   _ ->
-                     case validRegularHeader(Name, Value) of
+                     %% Value 已在本层 validHeaderValue/1 校验过；普通字段
+                     %% 不要在 validRegularHeader/2 里再完整扫描一遍 value。
+                     case validRegularHeaderValidated(Name, Value) of
                         false ->
                            {error, {bad_header, Name}};
                         true ->
@@ -1587,16 +1589,21 @@ allowedRequestPseudo(<<":path">>) -> true;
 allowedRequestPseudo(<<":protocol">>) -> true;
 allowedRequestPseudo(_) -> false.
 
+%% 通用入口用于 trailer 等尚未校验 value 的路径。
 validRegularHeader(Name, Value) ->
+   validHeaderValue(Value) andalso validRegularHeaderValidated(Name, Value).
+
+%% request header 主解析路径已经在外层校验过 value；这里只检查
+%% field-name / hop-by-hop / TE 特例，避免每个普通 header 重扫 value。
+validRegularHeaderValidated(Name, Value) ->
    case validHeaderName(Name) andalso not isHopByHop(Name) of
       false ->
          false;
       true when Name =:= <<"te">> ->
          %% TE is the one connection-specific exception in HTTP/2.
-         validHeaderValue(Value) andalso
-            wsUtil:headerNameEq(string:trim(Value), <<"trailers">>);
+         wsUtil:headerNameEq(string:trim(Value), <<"trailers">>);
       true ->
-         validHeaderValue(Value)
+         true
    end.
 
 validHeaderName(Name) ->
@@ -1724,9 +1731,13 @@ makeReqResult(MethodBin, Path, SchemeBin, Host, Port, Args, Regular, ContentLeng
 splitPathQuery(<<"*">>) -> {<<"*">>, []};
 splitPathQuery(<<>>) -> {<<>>, []};
 splitPathQuery(PathQuery) ->
-   case binary:split(PathQuery, <<"?">>) of
-      [Path] -> {Path, []};
-      [Path, Query] ->
+   %% 无 query 是绝大多数请求：binary:match/2 直接返回，不创建
+   %% binary:split/2 的 1~2 元临时列表。
+   case binary:match(PathQuery, <<"?">>) of
+      nomatch ->
+         {PathQuery, []};
+      {Pos, 1} ->
+         <<Path:Pos/binary, "?", Query/binary>> = PathQuery,
          Args = try uri_string:dissect_query(Query) catch _:_ -> [] end,
          {Path, Args}
    end.
