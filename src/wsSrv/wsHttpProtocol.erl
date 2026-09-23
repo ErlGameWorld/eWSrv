@@ -412,14 +412,21 @@ parseHostHeader(<<"[", Rest/binary>>, DefaultPort) ->
             _ -> error
          end
    end;
-parseHostHeader(HostHeader, DefaultPort) when is_binary(HostHeader) ->
-   case binary:split(HostHeader, <<":">>, [global]) of
-      [Host] when Host =/= <<>> ->
-         {Host, DefaultPort};
-      [Host, PortBin] when Host =/= <<>> ->
-         case parsePort(PortBin) of
-            {ok, Port} -> {Host, Port};
-            error -> error
+parseHostHeader(HostHeader, DefaultPort) when is_binary(HostHeader), HostHeader =/= <<>> ->
+   case binary:match(HostHeader, <<":">>) of
+      nomatch ->
+         {HostHeader, DefaultPort};
+      {Pos, 1} when Pos > 0 ->
+         <<Host:Pos/binary, ":", PortBin/binary>> = HostHeader,
+         case binary:match(PortBin, <<":">>) of
+            nomatch ->
+               case parsePort(PortBin) of
+                  {ok, Port} -> {Host, Port};
+                  error -> error
+               end;
+            _ ->
+               %% Unbracketed IPv6 is not a valid Host authority.
+               error
          end;
       _ ->
          error
@@ -439,20 +446,24 @@ parsePort(Bin) ->
    end.
 
 parsePath({abs_path, FullPath}) when is_binary(FullPath) ->
-   %% decode_packet 已经确认这是 origin-form。常见的 /hello、/api/... 没有
-   %% query/fragment，不需要每次进入通用 uri_string parser 创建 URI map。
-   %% 带 ?/# 的路径仍走原解析器，保持现有语义。
-   case binary:match(FullPath, <<"?">>) of
+   %% origin-form = absolute-path [ "?" query ]。HTTP request-target 不含 fragment，
+   %% 因此无需通用 uri_string:parse/1；直接拆 query 可覆盖绝大多数业务路径。
+   case binary:match(FullPath, <<"#">>) of
+      {_, _} ->
+         {error, invalid_uri};
       nomatch ->
-         case binary:match(FullPath, <<"#">>) of
-            nomatch ->
-               Path = case FullPath of <<>> -> <<"/">>; _ -> FullPath end,
+         case binary:split(FullPath, <<"?">>) of
+            [Path0] ->
+               Path = case Path0 of <<>> -> <<"/">>; _ -> Path0 end,
                {ok, undefined, undefined, undefined, Path, []};
-            _ ->
-               parseAbsPath(FullPath)
-         end;
-      _ ->
-         parseAbsPath(FullPath)
+            [Path0, Query] ->
+               Path = case Path0 of <<>> -> <<"/">>; _ -> Path0 end,
+               try
+                  {ok, undefined, undefined, undefined, Path, uri_string:dissect_query(Query)}
+               catch
+                  _:_ -> {error, invalid_uri}
+               end
+         end
    end;
 parsePath({absoluteURI, Scheme, Host, Port, Path}) ->
    case parsePath({abs_path, Path}) of
@@ -464,22 +475,3 @@ parsePath({absoluteURI, Scheme, Host, Port, Path}) ->
 parsePath(_) ->
    {error, unsupported_uri}.
 
-parseAbsPath(FullPath) ->
-   try uri_string:parse(FullPath) of
-      URIMap ->
-         Host = maps:get(host, URIMap, undefined),
-         Scheme = maps:get(scheme, URIMap, undefined),
-         Path0 = maps:get(path, URIMap, <<>>),
-         Path = case Path0 of <<>> -> <<"/">>; _ -> Path0 end,
-         Query = maps:get(query, URIMap, <<>>),
-         Port = maps:get(port, URIMap,
-            case Scheme of <<"http">> -> 80; <<"https">> -> 443; http -> 80; https -> 443; _ -> undefined end),
-         Args =
-            case Query of
-               <<>> -> [];
-               _ -> uri_string:dissect_query(Query)
-            end,
-         {ok, Scheme, Host, Port, Path, Args}
-   catch
-      _:_ -> {error, invalid_uri}
-   end.
