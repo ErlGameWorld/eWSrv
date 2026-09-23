@@ -302,9 +302,12 @@ handleMsg({tcp, _Socket, Data}, State0) ->
    case wsHttpProtocol:request(Stage, Data, Socket, State0) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         #wsState{
+            buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq,
+            reqConnClose = ReqClose, reqConnKeepAlive = ReqKeepAlive
+         } = NewState,
          Version = WsReq#wsReq.version,
-         case doResponse(Response, Socket, TemHeader, Method, Version) of
+         case doResponse(Response, Socket, TemHeader, Method, Version, {ReqClose, ReqKeepAlive}) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -404,9 +407,12 @@ handleMsg({ssl, _Socket, Data}, State0) ->
    case wsHttpProtocol:request(Stage, Data, Socket, State0) of
       {wsDone, NewState} ->
          Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
+         #wsState{
+            buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq,
+            reqConnClose = ReqClose, reqConnKeepAlive = ReqKeepAlive
+         } = NewState,
          Version = WsReq#wsReq.version,
-         case doResponse(Response, Socket, TemHeader, Method, Version) of
+         case doResponse(Response, Socket, TemHeader, Method, Version, {ReqClose, ReqKeepAlive}) of
             keep_alive ->
                case NBuffer of
                   <<>> ->
@@ -594,6 +600,8 @@ newWsState(WsState) ->
       , headerCnt = 0
       , headerBytes = 0
       , hostHeaderSeen = false
+      , reqConnClose = false
+      , reqConnKeepAlive = false
       , temHeader = []
       , contentLength = undefined
       , bodyAcc = []
