@@ -43,7 +43,33 @@ eWSrv:openSrv(8080, [
     {http2, true},
     {wsMod, wsTPHer}
 ]).
+
+%% 高吞吐 HTTP/2 场景可以显式调节本端并发 stream 与接收窗口。
+%% http2ReceiveWindow 同时作用于 stream 和 connection receive window。
+eWSrv:openSrv(8080, [
+    {http2, true},
+    {wsMod, wsTPHer},
+    {http2MaxConcurrentStreams, 256},
+    {http2ReceiveWindow, 1024 * 1024}
+]).
 ```
+
+常用限制/性能选项：
+
+| 选项 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `maxSize` | 8 MB | 单请求 body 上限 |
+| `maxRequestLineSize` | 8 KB | HTTP/1 request-line 上限 |
+| `maxHeaderSize` | 64 KB | H1/H2 请求头限制 |
+| `maxWsFrameSize` | 1 MB | WebSocket 单 frame 上限 |
+| `maxWsMessageSize` | 8 MB | WebSocket 完整 message 上限 |
+| `requestTimeout` | 30000 ms | 请求处理/接收超时 |
+| `keepAliveTimeout` | 60000 ms | 空闲连接超时 |
+| `http2MaxConcurrentStreams` | 100 | 本端允许的并发 client streams，并通过 SETTINGS 广播 |
+| `http2ReceiveWindow` | 65535 | H2 stream + connection 接收窗口，范围 65535..2^31-1 |
+| `chunkedSupp` | false | 是否接受 HTTP/1 chunked request body |
+
+增大 H2 receive window 可以提升高 BDP / 大上传吞吐，但也会增加每条活跃连接/stream 允许在途的数据量；应结合并发数和内存预算一起调。
 
 HTTPS + HTTP/2
 --------------
