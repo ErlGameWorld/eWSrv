@@ -26,6 +26,7 @@ listenOpt() |                 %% eNet相关配置
    socket :: inet:socket() | ssl:sslsocket(),
    args :: [{binary(), any()}],
    headers :: wsHeaders(),
+   trailers = [] :: wsHeaders(),
    body = <<>> :: wsBody()
 }).
 
