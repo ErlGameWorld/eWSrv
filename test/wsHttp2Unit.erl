@@ -350,14 +350,19 @@ largeResponseYields() ->
    _ = catch eWSrv:closeSrv(Name),
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
-      %% 给足 connection / stream send credit，确保测试到的是服务端调度公平性，
-      %% 不是 flow-control 自然把大流卡住。
+      %% 给足未来 stream 的发送窗口：idle stream 上不能提前发 WINDOW_UPDATE，
+      %% 因此先用客户端 SETTINGS 调大 INITIAL_WINDOW_SIZE，等服务端 ACK 后
+      %% 再放大 connection window。这样测试到的是服务端调度公平性，而不是
+      %% flow-control 自然把大流卡住。
       Credit = 4 * 1024 * 1024,
-      ok = gen_tcp:send(Sock, [
-         wsHttp2Frame:windowUpdateFrame(0, Credit),
-         wsHttp2Frame:windowUpdateFrame(1, Credit),
-         wsHttp2Frame:windowUpdateFrame(3, Credit)
-      ]),
+      ok = gen_tcp:send(Sock,
+         wsHttp2Frame:settingsFrame([{initial_window_size, Credit}])),
+      IsSettingsAck = fun(Fs) -> lists:any(fun
+         ({frame, settings, Flags, 0, <<>>}) -> Flags band 1 =/= 0;
+         (_) -> false
+      end, Fs) end,
+      {Parser2, _AckFrames} = recvUntil(IsSettingsAck, Sock, Parser1, [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:windowUpdateFrame(0, Credit)),
       H1 = [
          {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
          {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/1m">>}
@@ -373,7 +378,7 @@ largeResponseYields() ->
          wsHttp2Frame:headersFrames(B3, 3, 16384, true)
       ]),
       Done = fun(Fs) -> streamEnded(1, Fs) andalso streamEnded(3, Fs) end,
-      {_Parser2, Frames} = recvUntil(Done, Sock, Parser1, [], 5000),
+      {_Parser3, Frames} = recvUntil(Done, Sock, Parser2, [], 5000),
       PosSmall = framePosition(fun
          ({frame, data, _Flags, 3, <<"one">>}) -> true;
          (_) -> false
