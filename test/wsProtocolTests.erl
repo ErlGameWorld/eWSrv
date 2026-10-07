@@ -3,6 +3,12 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("wsCom.hrl").
 
+header_value_control_character_test() ->
+   ?assert(wsUtil:noCtlChars(<<"ok\tvalue">>)),
+   ?assertNot(wsUtil:noCtlChars(<<1>>)),
+   ?assertNot(wsUtil:noCtlChars(<<127>>)),
+   ?assertNot(wsUtil:noCtlChars(<<"bad\rvalue">>)).
+
 conflicting_content_length_test() ->
    Req = <<"POST / HTTP/1.1\r\n", "Host: localhost\r\n", "Content-Length: 4\r\n", "Content-Length: 5\r\n", "\r\n" >>,
    ?assertMatch({error, conflicting_content_length}, wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
@@ -39,10 +45,56 @@ origin_form_transport_scheme_test() ->
    HttpReq = HttpState#wsState.wsReq,
    ?assertEqual(<<"http">>, HttpReq#wsReq.scheme),
    ?assertEqual(80, HttpReq#wsReq.port),
+   ?assertEqual(<<"/">>, HttpReq#wsReq.path),
+   ?assertEqual([], HttpReq#wsReq.args),
    {wsDone, HttpsState} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{isSsl = true}),
    HttpsReq = HttpsState#wsState.wsReq,
    ?assertEqual(<<"https">>, HttpsReq#wsReq.scheme),
    ?assertEqual(443, HttpsReq#wsReq.port).
+
+origin_form_query_keeps_existing_semantics_test() ->
+   Req = <<"GET /params?a=1&b=two HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(<<"/params">>, WsReq#wsReq.path),
+   Args = maps:from_list(WsReq#wsReq.args),
+   ?assertEqual(<<"1">>, maps:get(<<"a">>, Args)),
+   ?assertEqual(<<"two">>, maps:get(<<"b">>, Args)).
+
+origin_form_fragment_is_rejected_test() ->
+   Req = <<"GET /hello#frag HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   ?assertMatch({error, invalid_uri},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
+
+connection_tokens_are_cached_during_parse_test() ->
+   Req = <<"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: Keep-Alive, Foo\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual(false, State#wsState.reqConnClose),
+   ?assertEqual(true, State#wsState.reqConnKeepAlive).
+
+options_asterisk_request_target_test() ->
+   Req = <<"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual(<<"*">>, (State#wsState.wsReq)#wsReq.path).
+
+asterisk_requires_options_test() ->
+   Req = <<"GET * HTTP/1.1\r\nHost: example.com\r\n\r\n">>,
+   ?assertMatch({error, invalid_request_target},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{})).
+
+connect_authority_form_test() ->
+   Req = <<"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual('CONNECT', WsReq#wsReq.method),
+   ?assertEqual(<<"example.com">>, WsReq#wsReq.host),
+   ?assertEqual(443, WsReq#wsReq.port),
+   ?assertEqual(<<"example.com:443">>, WsReq#wsReq.path).
+
+patch_method_is_normalized_test() ->
+   Req = <<"PATCH /resource HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n">>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{}),
+   ?assertEqual('PATCH', (State#wsState.wsReq)#wsReq.method).
 
 origin_form_explicit_host_port_test() ->
    Req = <<"GET / HTTP/1.1\r\nHost: example.com:9443\r\n\r\n">>,
@@ -72,6 +124,63 @@ chunked_pipeline_rest_test() ->
    {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true}),
    ?assertEqual(<<"a">>, (State#wsState.wsReq)#wsReq.body),
    ?assertMatch(<<"GET /next", _/binary>>, State#wsState.buffer).
+
+chunked_trailers_are_exposed_to_handler_test() ->
+   Req = <<
+      "POST / HTTP/1.1\r\n",
+      "Host: localhost\r\n",
+      "Transfer-Encoding: chunked\r\n",
+      "\r\n",
+      "1\r\na\r\n0\r\n",
+      "X-Checksum: ok\r\n\r\n"
+   >>,
+   {wsDone, State} = wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true}),
+   WsReq = State#wsState.wsReq,
+   ?assertEqual(false, lists:any(fun({K, _}) ->
+      wsUtil:headerNameEq(K, <<"X-Checksum">>)
+   end, WsReq#wsReq.headers)),
+   ?assert(lists:any(fun({K, V}) ->
+      wsUtil:headerNameEq(K, <<"X-Checksum">>) andalso V =:= <<"ok">>
+   end, WsReq#wsReq.trailers)).
+
+chunked_forbidden_trailer_is_rejected_test() ->
+   Req = <<
+      "POST / HTTP/1.1\r\n",
+      "Host: localhost\r\n",
+      "Transfer-Encoding: chunked\r\n",
+      "\r\n",
+      "1\r\na\r\n0\r\n",
+      "Content-Length: 1\r\n\r\n"
+   >>,
+   ?assertMatch({error, forbidden_trailer},
+      wsHttpProtocol:request(reqLine, Req, undefined, #wsState{chunkedSupp = true})).
+
+websocket_handshake_header_names_are_case_insensitive_test() ->
+   Key = base64:encode(<<0:128>>),
+   Req = #wsReq{
+      method = 'GET',
+      version = {1, 1},
+      headers = [
+         {<<"connection">>, <<"Upgrade">>},
+         {<<"UPGRADE">>, <<"websocket">>},
+         {<<"sec-websocket-version">>, <<"13">>},
+         {<<"SEC-WEBSOCKET-KEY">>, Key}
+      ]
+   },
+   ?assertMatch({ok, _}, wsWebSocket:tryWsUpgrade(Req)).
+
+websocket_subprotocol_negotiation_test() ->
+   Req = #wsReq{
+      headers = [
+         {<<"Sec-WebSocket-Protocol">>, <<"unknown, superchat, chat">>}
+      ]
+   },
+   {wsWebSocket, Headers} =
+      wsWebSocket:handleUpgrade(wsWsProtocolTestHandler, Req, []),
+   ?assertEqual(
+      {<<"Sec-WebSocket-Protocol">>, <<"superchat">>},
+      lists:keyfind(<<"Sec-WebSocket-Protocol">>, 1, Headers)
+   ).
 
 websocket_rejects_unmasked_client_frame_test() ->
    Frame = <<1:1, 0:3, ?WsOpText:4, 0:1, 1:7, "x">>,
@@ -111,7 +220,7 @@ websocket_unmasks_payload_test() ->
          {ok, [{1, ?WsOpText, Plain}], <<>>},
          wsWebSocket:parseWebSocketFrames(mask_text(Plain, Mask), #wsState{}, [])
       )
-   end, [0, 1, 2, 3, 4, 5, 7, 8, 20]).
+   end, [0, 1, 2, 3, 4, 5, 7, 8, 20, 31, 32, 33, 63, 64, 65, 125]).
 
 %% 1KB 分段喂入大帧：增量状态机应收齐后只解一次，结果与整包一致。
 websocket_feed_chunked_large_frame_test() ->

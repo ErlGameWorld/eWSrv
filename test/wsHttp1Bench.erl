@@ -17,17 +17,20 @@ run() ->
 
 run(Opts) when is_map(Opts) ->
    Requests = positive(maps:get(requests, Opts, 10000), requests),
-   Concurrency0 = positive(maps:get(concurrency, Opts, 32), concurrency),
-   Concurrency = erlang:min(100, Concurrency0),
+   Concurrency = positive(maps:get(concurrency, Opts, 32), concurrency),
    Warmup = nonNegative(maps:get(warmup, Opts, 1000), warmup),
    Path = maps:get(path, Opts, <<"/one">>),
    Quiet = maps:get(quiet, Opts, false),
+   %% 可选：把额外的 openSrv 选项透传进去（例如 {tcpOpts,[{buffer,65536}]}），
+   %% 便于对 socket 选项做同机 A/B。
+   WsOpts = maps:get(ws_opts, Opts, []),
 
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http1_bench,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
-      {ok, _} = eWSrv:openSrv(Name, 0, [{http2, false}, {wsMod, wsHttp2TestHandler}, {keepAliveTimeout, 300000}]),
+      {ok, _} = eWSrv:openSrv(Name, 0, [{http2, false}, {wsMod, wsHttp2TestHandler},
+         {keepAliveTimeout, 300000} | WsOpts]),
       ListenerName = ntCom:lsName(tcp, Name),
       Port = ntTcpListener:getListenPort(ListenerName),
 
@@ -45,7 +48,7 @@ run(Opts) when is_map(Opts) ->
       Quiet orelse printResult(Result),
       Result
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 startWorkers(Count, Port, Path) ->
@@ -88,11 +91,11 @@ workerLoop(Sock, Request, Buffer0) ->
                workerLoop(Sock, Request, Buffer);
             {error, Reason} ->
                From ! {Ref, self(), {error, Reason}},
-               catch gen_tcp:close(Sock),
+               try gen_tcp:close(Sock) catch _:_ -> ok end,
                exit(Reason)
          end;
       stop ->
-         catch gen_tcp:close(Sock),
+         try gen_tcp:close(Sock) catch _:_ -> ok end,
          ok
    end.
 
@@ -265,7 +268,8 @@ result(Requests, Concurrency, Warmup, TotalUs, Sorted) ->
       latency_avg_ms => avg(Sorted) / 1000,
       latency_p50_ms => percentile(Sorted, 0.50) / 1000,
       latency_p95_ms => percentile(Sorted, 0.95) / 1000,
-      latency_p99_ms => percentile(Sorted, 0.99) / 1000
+      latency_p99_ms => percentile(Sorted, 0.99) / 1000,
+      latency_p999_ms => percentile(Sorted, 0.999) / 1000
    }.
 
 avg([]) ->
@@ -291,7 +295,8 @@ printResult(R) ->
       "latency avg    : ~.3f ms~n"
       "latency p50    : ~.3f ms~n"
       "latency p95    : ~.3f ms~n"
-      "latency p99    : ~.3f ms~n~n",
+      "latency p99    : ~.3f ms~n"
+      "latency p99.9  : ~.3f ms~n~n",
       [
          maps:get(requests, R),
          maps:get(connections, R),
@@ -301,7 +306,8 @@ printResult(R) ->
          maps:get(latency_avg_ms, R),
          maps:get(latency_p50_ms, R),
          maps:get(latency_p95_ms, R),
-         maps:get(latency_p99_ms, R)
+         maps:get(latency_p99_ms, R),
+         maps:get(latency_p999_ms, R)
       ]).
 
 positive(N, _Name) when is_integer(N), N > 0 ->

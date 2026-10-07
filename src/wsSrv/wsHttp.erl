@@ -5,930 +5,1081 @@
 -include("wsCom.hrl").
 
 -export([
-   start_link/1
-   , start_link/2
-   , sendResponse/5
-   , sendFile/5
-   %% Exported for looping with a fully-qualified module name
-   , toBinStr/1
-   , status/1
-   , chunkLoop/1
-   , spellHeaders/1
-   , splitArgs/1
-   , closeOrKeepAlive/2
-   , maybeSendContinue/2
-   , tryCompressResponse/5
+	start_link/1
+	, start_link/2
+	, sendResponse/5
+	, sendFile/5
+	%% Exported for looping with a fully-qualified module name
+	, toBinStr/1
+	, status/1
+	, chunkLoop/1
+	, spellHeaders/1
+	, splitArgs/1
+	, closeOrKeepAlive/2
+	, maybeSendContinue/2
+	, tryCompressResponse/5
 ]).
 
 %% eNet callback
 -export([newConn/2]).
 
 -export([
-   init_it/2
-   , system_code_change/4
-   , system_continue/3
-   , system_get_state/1
-   , system_terminate/4
+	init_it/2
+	, system_code_change/4
+	, system_continue/3
+	, system_get_state/1
+	, system_terminate/4
 ]).
 
 newConn(Sock, ConnArgs) ->
-   case element(1, ConnArgs) of
-      undefined ->
-         %% 无外部 supervisor 时也必须走 start_link/2。旧路径丢掉 Sock，
-         %% 同时跳过 WsMod:init/1 并关闭 behavior 消息分发，导致默认配置
-         %% 与配置 wsSupName 时的回调语义不一致。
-         ?MODULE:start_link(Sock, ConnArgs);
-      WsSupName ->
-         supervisor:start_child(WsSupName, [Sock, ConnArgs])
-   end.
+	case element(1, ConnArgs) of
+		undefined ->
+			%% acceptor 交出 socket 后，连接应由 socket 自身决定生命周期，
+			%% 不应和可重启的 acceptor 建立 link。
+			start(Sock, ConnArgs);
+		WsSupName ->
+			supervisor:start_child(WsSupName, [Sock, ConnArgs])
+	end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec(start_link(atom()) -> {ok, pid()} | ignore | {error, term()}).
 start_link(ConnArgs) ->
-   proc_lib:start_link(?MODULE, init_it, [self(), ConnArgs], infinity, []).
+	proc_lib:start_link(?MODULE, init_it, [self(), ConnArgs], infinity, []).
 
 start_link(Sock, ConnArgs) ->
-   proc_lib:start_link(?MODULE, init_it, [self(), {Sock, ConnArgs}], infinity, []).
+	proc_lib:start_link(?MODULE, init_it, [self(), {Sock, ConnArgs}], infinity, []).
+
+start(Sock, ConnArgs) ->
+	proc_lib:start(?MODULE, init_it, [self(), {Sock, ConnArgs}], infinity, []).
 
 init_it(Parent, Args) ->
-   process_flag(trap_exit, true),
-   modInit(Parent, Args).
+	process_flag(trap_exit, true),
+	modInit(Parent, Args).
 
 -spec system_code_change(term(), module(), undefined | term(), term()) -> {ok, term()}.
 system_code_change(State, _Module, _OldVsn, _Extra) ->
-   {ok, State}.
+	{ok, State}.
 
 -spec system_continue(pid(), [], {module(), atom(), pid(), term()}) -> ok.
 system_continue(_Parent, _Debug, {Parent, State}) ->
-   loop(Parent, State).
+	loop(Parent, State).
 
 -spec system_get_state(term()) -> {ok, term()}.
-system_get_state(State) ->
-   {ok, State}.
+system_get_state({_Parent, State}) ->
+	{ok, State}.
 
 -spec system_terminate(term(), pid(), [], term()) -> none().
-system_terminate(Reason, _Parent, _Debug, State) ->
-   terminate(Reason, State).
+system_terminate(Reason, _Parent, _Debug, {_LoopParent, State}) ->
+	terminate(Reason, State).
 
 modInit(Parent, Args) ->
-   case init(Args) of
-      {ok, State} ->
-         proc_lib:init_ack(Parent, {ok, self()}),
-         loop(Parent, State);
-      {stop, Reason} ->
-         proc_lib:init_ack(Parent, {error, Reason}),
-         exit(Reason)
-   end.
+	case init(Args) of
+		{ok, State} ->
+			proc_lib:init_ack(Parent, {ok, self()}),
+			loop(Parent, State);
+		{stop, Reason} ->
+			proc_lib:init_ack(Parent, {error, Reason}),
+			exit(Reason)
+	end.
 
 -define(STACKTRACE(), element(2, erlang:process_info(self(), current_stacktrace))).
 loop(Parent, State) ->
-   receive
-      {system, From, Request} ->
-         sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {Parent, State});
-      {'EXIT', Parent, Reason} ->
-         terminate(Reason, State);
-      Msg ->
-         try handleMsg(Msg, State) of
-            kpS ->
-               loop(Parent, State);
-            {ok, NewState} ->
-               loop(Parent, NewState);
-            {stop, Reason} ->
-               terminate(Reason, State);
-            {stop, Reason, NewState} ->
-               terminate(Reason, NewState)
-         catch
-            Class:CrashReason:Stack ->
-               ?wsErr("wsHttp handleMsg crash ~p:~p ~p", [Class, CrashReason, Stack]),
-               terminate({handler_crash, Class, CrashReason}, State)
-         end
-   after loopTimeout(State) ->
-      case handleLoopTimeout(State) of
-         {ok, NewState} ->
-            loop(Parent, NewState);
-         {stop, Reason} ->
-            terminate(Reason, State);
-         {stop, Reason, NewState} ->
-            terminate(Reason, NewState)
-      end
-   end.
+	receive
+		{system, From, Request} ->
+			sys:handle_system_msg(Request, From, Parent, ?MODULE, [], {Parent, State});
+		{'EXIT', Parent, Reason} ->
+			terminate(Reason, State);
+		{inet_reply, _Sock, ok, MRef} ->
+			erlang:demonitor(MRef, [flush]),
+			loop(Parent, State);
+		{inet_reply, _Sock, {error, Error}, MRef} ->
+			erlang:demonitor(MRef, [flush]),
+			terminate(Error, State);
+		%% 必须 State#wsState.socket 取字段值：#wsState.socket 是记录索引(整数)，恒不等
+		{'DOWN', _MRef, port, Sock, Reason} when Sock =:= State#wsState.socket ->
+			terminate(Reason, State);
+		Msg ->
+			try handleMsg(Msg, State) of
+				kpS ->
+					loop(Parent, State);
+				{ok, NewState} ->
+					loop(Parent, NewState);
+				{stop, Reason} ->
+					terminate(Reason, State);
+				{stop, Reason, NewState} ->
+					terminate(Reason, NewState)
+			catch
+				Class:CrashReason:Stack ->
+					?wsErr("wsHttp handleMsg crash ~p:~p ~p", [Class, CrashReason, Stack]),
+					terminate({handler_crash, Class, CrashReason}, State)
+			end
+	after loopTimeout(State) ->
+		case handleLoopTimeout(State) of
+			{ok, NewState} ->
+				loop(Parent, NewState);
+			{stop, Reason} ->
+				terminate(Reason, State);
+			{stop, Reason, NewState} ->
+				terminate(Reason, NewState)
+		end
+	end.
 
-handleLoopTimeout(#wsState{protocol = http2, h2State = H2} = State) when is_map(H2) ->
-   NH2 = wsHttp2:idleClose(H2),
-   _ = erlang:send_after(50, self(), h2_drain_close),
-   {ok, State#wsState{h2State = NH2}};
+handleLoopTimeout(#wsState{protocol = http2, h2State = H2} = State) when is_tuple(H2) ->
+	NH2 = wsHttp2:idleClose(H2),
+	_ = erlang:send_after(50, self(), h2_drain_close),
+	{ok, State#wsState{h2State = NH2}};
 handleLoopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined}) ->
-   {stop, normal};
+	{stop, normal};
+handleLoopTimeout(#wsState{stage = wsWsClosing}) ->
+	{stop, normal};
 handleLoopTimeout(#wsState{stage = wsWs} = State) ->
-   {ok, State};
+	{ok, State};
 handleLoopTimeout(#wsState{socket = Socket}) ->
-   try sendRescueResponse(Socket, 408, <<"Request Timeout">>)
-   catch _:_ -> ok
-   end,
-   {stop, timeout}.
+	try sendRescueResponse(Socket, 408, <<"Request Timeout">>)
+	catch _:_ -> ok
+	end,
+	{stop, timeout}.
 
 loopTimeout(#wsState{stage = wsWs}) ->
-   infinity;
+	infinity;
+loopTimeout(#wsState{stage = wsWsClosing, wsCloseDeadline = Deadline}) when is_integer(Deadline) ->
+	erlang:max(0, Deadline - erlang:monotonic_time(millisecond));
 loopTimeout(#wsState{protocol = http2, h2State = H2, keepAliveTimeout = Timeout}) ->
-   case is_map(H2) andalso wsHttp2:hasOpenStreams(H2) of
-      true -> infinity;
-      false -> Timeout
-   end;
+	case wsHttp2:hasOpenStreams(H2) of
+		true -> infinity;
+		false -> Timeout
+	end;
 loopTimeout(#wsState{stage = reqLine, buffer = <<>>, requestStartedAt = undefined, keepAliveTimeout = Timeout}) ->
-   Timeout;
+	Timeout;
 loopTimeout(#wsState{requestStartedAt = undefined, requestTimeout = Timeout}) ->
-   Timeout;
+	Timeout;
 loopTimeout(#wsState{requestStartedAt = Started, requestTimeout = Timeout}) ->
-   Now = erlang:monotonic_time(millisecond),
-   erlang:max(0, Timeout - (Now - Started)).
+	Now = erlang:monotonic_time(millisecond),
+	erlang:max(0, Timeout - (Now - Started)).
 
 matchCallMsg(CurState, From, Request) ->
-   #wsState{wsMod = WsMod, webState = WebState} = CurState,
-   try WsMod:handleCall(Request, WebState, From) of
-      Result ->
-         handleCR(CurState, Result, From)
-   catch
-      throw:Result ->
-         handleCR(CurState, Result, From);
-      Class:Reason:Strace ->
-         From /= false andalso gen_server:reply(From, {error, {inner_error, {Class, Reason, Strace}}}),
-         innerError(CurState, {{call, From}, Request}, Class, Reason, Strace),
-         kpS
-   end.
+	#wsState{wsMod = WsMod, webState = WebState} = CurState,
+	try WsMod:handleCall(Request, WebState, From) of
+		Result ->
+			handleCR(CurState, Result, From)
+	catch
+		throw:Result ->
+			handleCR(CurState, Result, From);
+		Class:Reason:Strace ->
+			From /= false andalso gen_server:reply(From, {error, {inner_error, {Class, Reason, Strace}}}),
+			innerError(CurState, {{call, From}, Request}, Class, Reason, Strace),
+			kpS
+	end.
 
 matchCastMsg(CurState, Cast) ->
-   #wsState{wsMod = WsMod, webState = WebState} = CurState,
-   try WsMod:handleCast(Cast, WebState) of
-      Result ->
-         handleCR(CurState, Result, false)
-   catch
-      throw:Result ->
-         handleCR(CurState, Result, false);
-      Class:Reason:Strace ->
-         innerError(CurState, {cast, Cast}, Class, Reason, Strace),
-         kpS
-   end.
+	#wsState{wsMod = WsMod, webState = WebState} = CurState,
+	try WsMod:handleCast(Cast, WebState) of
+		Result ->
+			handleCR(CurState, Result, false)
+	catch
+		throw:Result ->
+			handleCR(CurState, Result, false);
+		Class:Reason:Strace ->
+			innerError(CurState, {cast, Cast}, Class, Reason, Strace),
+			kpS
+	end.
 
 matchInfoMsg(CurState, Cast) ->
-   #wsState{wsMod = WsMod, webState = WebState} = CurState,
-   try WsMod:handleInfo(Cast, WebState) of
-      Result ->
-         handleCR(CurState, Result, false)
-   catch
-      throw:Result ->
-         handleCR(CurState, Result, false);
-      Class:Reason:Strace ->
-         innerError(CurState, {cast, Cast}, Class, Reason, Strace),
-         kpS
-   end.
+	#wsState{wsMod = WsMod, webState = WebState} = CurState,
+	try WsMod:handleInfo(Cast, WebState) of
+		Result ->
+			handleCR(CurState, Result, false)
+	catch
+		throw:Result ->
+			handleCR(CurState, Result, false);
+		Class:Reason:Strace ->
+			innerError(CurState, {cast, Cast}, Class, Reason, Strace),
+			kpS
+	end.
 
 handleCR(CurState, Result, From) ->
-   case Result of
-      kpS ->
-         kpS;
-      {reply, Reply} ->
-         gen_server:reply(From, Reply),
-         kpS;
-      {mayReply, Reply} ->
-         case From of
-            false ->
-               kpS;
-            _ ->
-               gen_server:reply(From, Reply),
-               kpS
-         end;
-      {noreply, NewState} ->
-         {ok, CurState#wsState{webState = NewState}};
-      {reply, Reply, NewState} ->
-         gen_server:reply(From, Reply),
-         {ok, CurState#wsState{webState = NewState}};
-      {mayReply, Reply, NewState} ->
-         case From of
-            false ->
-               {ok, CurState#wsState{webState = NewState}};
-            _ ->
-               gen_server:reply(From, Reply),
-               {ok, CurState#wsState{webState = NewState}}
-         end;
-      {stop, Reason, NewState} ->
-         {stop, Reason, CurState#wsState{webState = NewState}};
-      {stopReply, Reason, Reply, NewState} ->
-         gen_server:reply(From, Reply),
-         {stop, Reason, CurState#wsState{webState = NewState}};
-      _AnyRet ->
-         innerError(CurState, {return, _AnyRet}, error, bad_ret, ?STACKTRACE()),
-         kpS
-   end.
+	case Result of
+		kpS ->
+			kpS;
+		{reply, Reply} ->
+			gen_server:reply(From, Reply),
+			kpS;
+		{mayReply, Reply} ->
+			case From of
+				false ->
+					kpS;
+				_ ->
+					gen_server:reply(From, Reply),
+					kpS
+			end;
+		{noreply, NewState} ->
+			{ok, CurState#wsState{webState = NewState}};
+		{reply, Reply, NewState} ->
+			gen_server:reply(From, Reply),
+			{ok, CurState#wsState{webState = NewState}};
+		{mayReply, Reply, NewState} ->
+			case From of
+				false ->
+					{ok, CurState#wsState{webState = NewState}};
+				_ ->
+					gen_server:reply(From, Reply),
+					{ok, CurState#wsState{webState = NewState}}
+			end;
+		{stop, Reason, NewState} ->
+			{stop, Reason, CurState#wsState{webState = NewState}};
+		{stopReply, Reason, Reply, NewState} ->
+			gen_server:reply(From, Reply),
+			{stop, Reason, CurState#wsState{webState = NewState}};
+		_AnyRet ->
+			innerError(CurState, {return, _AnyRet}, error, bad_ret, ?STACKTRACE()),
+			kpS
+	end.
 
 innerError(_CurState, Error, Class, Reason, Strace) ->
-   logger:error("wsHttp inner error ~p ~p ~p ~p ~p", [?MODULE, Error, Class, Reason, Strace]),
-   ok.
+	logger:error("wsHttp inner error ~p ~p ~p ~p ~p", [?MODULE, Error, Class, Reason, Strace]),
+	ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% genActor  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ************************************************  API ***************************************************************
 init(Args) ->
-   case Args of
-      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-         Http2, RequestTimeout, KeepAliveTimeout} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-            Http2, RequestTimeout, KeepAliveTimeout, false, undefined)};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-         Http2, RequestTimeout, KeepAliveTimeout}} ->
-         case maybeInitHandler(WsMod, Args) of
-            {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-                  Http2, RequestTimeout, KeepAliveTimeout, true, WebState)};
-            {stop, Reason} ->
-               {stop, Reason}
-         end;
-      %% 兼容前一版feature分支的9元组连接参数。
-      {undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-            Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2}} ->
-         case maybeInitHandler(WsMod, Args) of
-            {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-                  Http2, ?DefRequestTimeout, ?DefKeepAliveTimeout, true, WebState)};
-            {stop, Reason} ->
-               {stop, Reason}
-         end;
-      %% 兼容旧版eNet传入的4元组连接参数。
-      {undefined, WsMod, MaxSize, ChunkedSupp} ->
-         {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize, ?DefMaxWsFrameSize,
-            ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout, false, undefined)};
-      {_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp}} ->
-         case maybeInitHandler(WsMod, Args) of
-            {ok, WebState} ->
-               {ok, newConnState(WsMod, MaxSize, ChunkedSupp, ?DefMaxRequestLineSize, ?DefMaxHeaderSize,
-                  ?DefMaxWsFrameSize, ?DefMaxWsMessageSize, false, ?DefRequestTimeout, ?DefKeepAliveTimeout,
-                  true, WebState)};
-            {stop, Reason} ->
-               {stop, Reason}
-         end
-   end.
+	case Args of
+		{undefined, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow} ->
+			{ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, false, undefined)};
+		{_Socket, {_WsSupName, WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow}} ->
+			case maybeInitHandler(WsMod, Args) of
+				{ok, WebState} ->
+					{ok, newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, true, WebState)};
+				{stop, Reason} ->
+					{stop, Reason}
+			end;
+		_ ->
+			{stop, {bad_connection_args, Args}}
+	end.
 
-newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage,
-   Http2, RequestTimeout, KeepAliveTimeout, IsBehavior, WebState) ->
-   Protocol = case Http2 of true -> detect; false -> http1 end,
-   #wsState{
-      wsMod = WsMod,
-      maxSize = MaxSize,
-      chunkedSupp = ChunkedSupp,
-      maxRequestLineSize = MaxReqLine,
-      maxHeaderSize = MaxHeader,
-      maxWsFrameSize = MaxWsFrame,
-      maxWsMessageSize = MaxWsMessage,
-      http2Enabled = Http2,
-      protocol = Protocol,
-      requestTimeout = RequestTimeout,
-      keepAliveTimeout = KeepAliveTimeout,
-      is_behavior = IsBehavior,
-      webState = WebState
-   }.
+newConnState(WsMod, MaxSize, ChunkedSupp, MaxReqLine, MaxHeader, MaxWsFrame, MaxWsMessage, Http2, RequestTimeout, KeepAliveTimeout, H2MaxConcurrent, H2ReceiveWindow, IsBehavior, WebState) ->
+	Protocol = case Http2 of true -> detect; false -> http1 end,
+	#wsState{
+		wsMod = WsMod,
+		maxSize = MaxSize,
+		chunkedSupp = ChunkedSupp,
+		maxRequestLineSize = MaxReqLine,
+		maxHeaderSize = MaxHeader,
+		maxWsFrameSize = MaxWsFrame,
+		maxWsMessageSize = MaxWsMessage,
+		http2Enabled = Http2,
+		http2MaxConcurrentStreams = H2MaxConcurrent,
+		http2ReceiveWindow = H2ReceiveWindow,
+		protocol = Protocol,
+		requestTimeout = RequestTimeout,
+		keepAliveTimeout = KeepAliveTimeout,
+		is_behavior = IsBehavior,
+		webState = WebState
+	}.
 
 maybeInitHandler(WsMod, Args) ->
-   case erlang:function_exported(WsMod, init, 1) of
-      true -> WsMod:init(Args);
-      false -> {ok, undefined}
-   end.
+	%% function_exported/3 returns false for an unloaded module. A new
+	%% connection must not silently skip the handler's init/1 callback.
+	case code:ensure_loaded(WsMod) of
+		{module, WsMod} ->
+			case erlang:function_exported(WsMod, init, 1) of
+				true -> WsMod:init(Args);
+				false -> {ok, undefined}
+			end;
+		{error, Reason} ->
+			{stop, {handler_load_failed, Reason}}
+	end.
 
-handleMsg({tcp, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
-   handleHttp2Data(Data, H2, State);
+handleMsg({tcp, _Socket, Data}, #wsState{stage = wsWsClosing} = State) ->
+	handleWsClosingData(Data, State);
+handleMsg({ssl, _Socket, Data}, #wsState{stage = wsWsClosing} = State) ->
+	handleWsClosingData(Data, State);
+handleMsg({tcp, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) when is_tuple(H2) ->
+	handleHttp2Data(Data, H2, State);
+handleMsg({tcp, _Socket, _Data}, #wsState{protocol = http2} = State) ->
+	{stop, invalid_http2_state, State};
 handleMsg({tcp, _Socket, Data}, #wsState{protocol = detect, http2Enabled = true} = State) ->
-   detectCleartextProtocol(Data, State);
+	detectCleartextProtocol(Data, State);
 handleMsg({tcp, _Socket, Data}, State0) ->
-   State = ensureRequestStarted(State0),
-   #wsState{stage = Stage, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, Data, Socket, State) of
-      {wsDone, NewState} ->
-         Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
-         Version = WsReq#wsReq.version,
-         case doResponse(Response, Socket, TemHeader, Method, Version) of
-            keep_alive ->
-               case NBuffer of
-                  <<>> ->
-                     {ok, newWsState(NewState)};
-                  _ ->
-                     handleMsg({tcp, Socket, NBuffer}, newWsState(NewState))
-               end;
-            keep_ws ->
-               %% Switch to WebSocket stage and notify handler
-               %% 添加WebSocket扩展支持（如果模块支持）
-               TemWsState = newWsState(NewState),
-               NewWsState = TemWsState#wsState{stage = wsWs},
-               case NBuffer of
-                  <<>> -> {ok, NewWsState};
-                  _ ->
-                     handleMsg({tcp, Socket, NBuffer}, NewWsState)
-               end;
-            close ->
-               {stop, normal};
-            {stop, Reason} ->
-               {stop, Reason};
-            {stop, Reason, StopState} ->
-               {stop, Reason, StopState}
-         end;
-      {ok, _NewState} = LRet ->
-         LRet;
-      {close, _NewState} ->
-         {stop, normal};
-      {close, Reason, NewState} ->
-         maybeSendWsClose(NewState, Reason),
-         {stop, Reason};
-      Err ->
-         case Err of
-            {err_code, Code} ->
-               sendRescueResponse(Socket, Code, <<>>),
-               {stop, Err};
-            _ ->
-               ?wsErr("recv the http data error ~p~n", [Err]),
-               Stage /= wsWs andalso sendBadRequest(Socket),
-               {stop, Err}
-         end
-   end;
+	#wsState{stage = Stage, socket = Socket} = State0,
+	case wsHttpProtocol:request(Stage, Data, Socket, State0) of
+		{wsDone, NewState} ->
+			Response = doHandle(NewState),
+			#wsState{
+				buffer = NBuffer, socket = Socket, temHeader = TemHeader, method = Method, wsReq = WsReq,
+				reqConnClose = ReqClose, reqConnKeepAlive = ReqKeepAlive
+			} = NewState,
+			Version = WsReq#wsReq.version,
+			case doResponse(Response, Socket, TemHeader, Method, Version, {ReqClose, ReqKeepAlive}) of
+				keep_alive ->
+					case NBuffer of
+						<<>> ->
+							{ok, newWsState(NewState)};
+						_ ->
+							handleMsg({tcp, Socket, NBuffer}, newWsState(NewState))
+					end;
+				keep_ws ->
+					%% Switch to WebSocket stage and notify handler
+					%% 添加WebSocket扩展支持（如果模块支持）
+					TemWsState = newWsState(NewState),
+					NewWsState = TemWsState#wsState{stage = wsWs},
+					case NBuffer of
+						<<>> -> {ok, NewWsState};
+						_ ->
+							handleMsg({tcp, Socket, NBuffer}, NewWsState)
+					end;
+				close ->
+					{stop, normal};
+				{stop, Reason} ->
+					{stop, Reason};
+				{stop, Reason, StopState} ->
+					{stop, Reason, StopState}
+			end;
+		{ok, NewState} ->
+			%% 完整单包请求无需读取 monotonic clock；只有需要等待后续数据时
+			%% 才启动 requestTimeout 计时，避免给 /hello 这类热路径增加固定成本。
+			{ok, markRequestStarted(State0, NewState)};
+		{close, _NewState} ->
+			{stop, normal};
+		{close, {handler_close, HandlerReason}, NewState} ->
+			beginWsClose(NewState, HandlerReason);
+		{close, Reason, NewState} ->
+			maybeSendWsClose(NewState, Reason),
+			{stop, Reason};
+		Err ->
+			case Err of
+				{err_code, Code} ->
+					sendRescueResponse(Socket, Code, <<>>),
+					{stop, Err};
+				_ ->
+					?wsErr("recv the http data error ~p~n", [Err]),
+					Stage /= wsWs andalso sendBadRequest(Socket),
+					{stop, Err}
+			end
+	end;
+handleMsg(h2_flush_pending, #wsState{protocol = http2, h2State = H2} = State) ->
+	case wsHttp2:resumePending(H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{error, Code, Reason} ->
+			{stop, {http2_flush, Code, Reason}, State};
+		{stop, Reason, NH2} ->
+			{stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg(h2_drain_close, #wsState{protocol = http2} = _State) ->
-   {stop, normal};
+	{stop, normal};
 handleMsg({h2_settings_ack_timeout, Token}, #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleSettingsTimeout(Token, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
-handleMsg({h2_request_timeout, StreamId, Token}, #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleRequestTimeout(StreamId, Token, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
+	case wsHttp2:handleSettingsTimeout(Token, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
+handleMsg(h2_stream_sweep, #wsState{protocol = http2, h2State = H2} = State) ->
+	case wsHttp2:handleStreamSweep(H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({h2_stream_start, StreamId, WorkerPid, Token, Req, Headers, Initial},
-   #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleStreamStart(StreamId, WorkerPid, Token, Req, Headers, Initial, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
+	#wsState{protocol = http2, h2State = H2} = State) ->
+	case wsHttp2:handleStreamStart(StreamId, WorkerPid, Token, Req, Headers, Initial, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({h2_stream_chunk, StreamId, WorkerPid, Token, Data, From},
-   #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleStreamChunk(StreamId, WorkerPid, Token, Data, From, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
+	#wsState{protocol = http2, h2State = H2} = State) ->
+	case wsHttp2:handleStreamChunk(StreamId, WorkerPid, Token, Data, From, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({h2_stream_close, StreamId, WorkerPid, From}, #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleStreamClose(StreamId, WorkerPid, From, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
+	case wsHttp2:handleStreamClose(StreamId, WorkerPid, From, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({h2_response, StreamId, WorkerPid, Req, Response}, #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end;
+	case wsHttp2:handleResponse(StreamId, WorkerPid, Req, Response, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({'DOWN', MonitorRef, process, _Pid, Reason}, #wsState{protocol = http2, h2State = H2} = State) ->
-   case wsHttp2:handleWorkerDown(MonitorRef, Reason, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, StopReason, NH2} -> {stop, StopReason, State#wsState{h2State = NH2}}
-   end;
+	case wsHttp2:handleWorkerDown(MonitorRef, Reason, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, StopReason, NH2} -> {stop, StopReason, State#wsState{h2State = NH2}}
+	end;
 handleMsg({tcp_closed, _Socket}, _State) ->
-   {stop, normal};
+	{stop, normal};
 handleMsg({tcp_error, _Socket, Reason}, _State) ->
-   ?wsErr("the http tcp socket error ~p~n", [Reason]),
-   {stop, tcp_error};
+	?wsErr("the http tcp socket error ~p~n", [Reason]),
+	{stop, tcp_error};
 handleMsg({tcp_passive, Socket}, _State) ->
-   wsNet:setopts(Socket, [{active, ?ActionN}]),
-   kpS;
+	wsNet:setopts(Socket, [{active, ?ActionN}]),
+	kpS;
 
-handleMsg({ssl, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) ->
-   handleHttp2Data(Data, H2, State);
+handleMsg({ssl, _Socket, Data}, #wsState{protocol = http2, h2State = H2} = State) when is_tuple(H2) ->
+	handleHttp2Data(Data, H2, State);
+handleMsg({ssl, _Socket, _Data}, #wsState{protocol = http2} = State) ->
+	{stop, invalid_http2_state, State};
 handleMsg({ssl, _Socket, Data}, State0) ->
-   State = ensureRequestStarted(State0),
-   #wsState{stage = Stage, socket = Socket} = State,
-   case wsHttpProtocol:request(Stage, Data, Socket, State) of
-      {wsDone, NewState} ->
-         Response = doHandle(NewState),
-         #wsState{buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq} = NewState,
-         Version = WsReq#wsReq.version,
-         case doResponse(Response, Socket, TemHeader, Method, Version) of
-            keep_alive ->
-               case NBuffer of
-                  <<>> ->
-                     {ok, newWsState(NewState)};
-                  _ ->
-                     handleMsg({ssl, Socket, NBuffer}, newWsState(NewState))
-               end;
-            keep_ws ->
-               %% Switch to WebSocket stage and notify handler
-               TemWsState = newWsState(NewState),
-               NewWsState = TemWsState#wsState{stage = wsWs},
-               case NBuffer of
-                  <<>> -> {ok, NewWsState};
-                  _ ->
-                     handleMsg({ssl, Socket, NBuffer}, NewWsState)
-               end;
-            close ->
-               {stop, normal};
-            {stop, Reason} ->
-               {stop, Reason};
-            {stop, Reason, StopState} ->
-               {stop, Reason, StopState}
-         end;
-      {ok, _NewState} = LRet ->
-         LRet;
-      {close, _NewState} ->
-         {stop, normal};
-      {close, Reason, NewState} ->
-         maybeSendWsClose(NewState, Reason),
-         {stop, Reason};
-      Err ->
-         case Err of
-            {err_code, Code} ->
-               sendRescueResponse(Socket, Code, <<>>),
-               {stop, Err};
-            _ ->
-               ?wsErr("recv the http data error ~p~n", [Err]),
-               Stage /= wsWs andalso sendBadRequest(Socket),
-               {stop, Err}
-         end
-   end;
+	#wsState{stage = Stage, socket = Socket} = State0,
+	case wsHttpProtocol:request(Stage, Data, Socket, State0) of
+		{wsDone, NewState} ->
+			Response = doHandle(NewState),
+			#wsState{
+				buffer = NBuffer, temHeader = TemHeader, method = Method, wsReq = WsReq,
+				reqConnClose = ReqClose, reqConnKeepAlive = ReqKeepAlive
+			} = NewState,
+			Version = WsReq#wsReq.version,
+			case doResponse(Response, Socket, TemHeader, Method, Version, {ReqClose, ReqKeepAlive}) of
+				keep_alive ->
+					case NBuffer of
+						<<>> ->
+							{ok, newWsState(NewState)};
+						_ ->
+							handleMsg({ssl, Socket, NBuffer}, newWsState(NewState))
+					end;
+				keep_ws ->
+					%% Switch to WebSocket stage and notify handler
+					TemWsState = newWsState(NewState),
+					NewWsState = TemWsState#wsState{stage = wsWs},
+					case NBuffer of
+						<<>> -> {ok, NewWsState};
+						_ ->
+							handleMsg({ssl, Socket, NBuffer}, NewWsState)
+					end;
+				close ->
+					{stop, normal};
+				{stop, Reason} ->
+					{stop, Reason};
+				{stop, Reason, StopState} ->
+					{stop, Reason, StopState}
+			end;
+		{ok, NewState} ->
+			%% 完整单包请求无需读取 monotonic clock；只有需要等待后续数据时
+			%% 才启动 requestTimeout 计时，避免给 /hello 这类热路径增加固定成本。
+			{ok, markRequestStarted(State0, NewState)};
+		{close, _NewState} ->
+			{stop, normal};
+		{close, {handler_close, HandlerReason}, NewState} ->
+			beginWsClose(NewState, HandlerReason);
+		{close, Reason, NewState} ->
+			maybeSendWsClose(NewState, Reason),
+			{stop, Reason};
+		Err ->
+			case Err of
+				{err_code, Code} ->
+					sendRescueResponse(Socket, Code, <<>>),
+					{stop, Err};
+				_ ->
+					?wsErr("recv the http data error ~p~n", [Err]),
+					Stage /= wsWs andalso sendBadRequest(Socket),
+					{stop, Err}
+			end
+	end;
 handleMsg({ssl_closed, _Socket}, _State) ->
-   {stop, normal};
+	{stop, normal};
 handleMsg({ssl_passive, Socket}, _State) ->
-   wsNet:setopts(Socket, [{active, ?ActionN}]),
-   kpS;
+	wsNet:setopts(Socket, [{active, ?ActionN}]),
+	kpS;
 handleMsg({ssl_error, _Socket, Reason}, _State) ->
-   ?wsErr("the http ssl socket error ~p~n", [Reason]),
-   {stop, ssl_error};
+	?wsErr("the http ssl socket error ~p~n", [Reason]),
+	{stop, ssl_error};
 handleMsg({?mSockReady, Socket}, State) ->
-   inet:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
-   {ok, State#wsState{socket = Socket}};
+	inet:setopts(Socket, [{packet, raw}, {active, ?ActionN}]),
+	{ok, State#wsState{socket = Socket}};
 handleMsg({?mSockReady, Socket, SslOpts, SslHSTet}, State) ->
-   case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
-      {ok, SslSock} ->
-         ssl:setopts(SslSock, [{packet, raw}, {active, ?ActionN}]),
-         sslProtocolState(SslSock, State#wsState{socket = SslSock, isSsl = true});
-      _Err ->
-         ?wsErr("ssl handshake error ~p~n", [_Err]),
-         {stop, handshake_error}
-   end;
+	case ntSslAcceptor:handshake(Socket, SslOpts, SslHSTet) of
+		{ok, SslSock} ->
+			ssl:setopts(SslSock, [{packet, raw}, {active, ?ActionN}]),
+			sslProtocolState(SslSock, State#wsState{socket = SslSock, isSsl = true});
+		{error, {tls_alert, {certificate_unknown, _}}} ->
+			%% The peer rejected the server certificate. This is a normal
+			%% client-side TLS abort (for example, an untrusted self-signed cert),
+			%% so don't report it as a server error for every failed attempt.
+			{stop, handshake_error};
+		_Err ->
+			?wsErr("ssl handshake error ~p~n", [_Err]),
+			{stop, handshake_error}
+	end;
+handleMsg({'$gen_call', From, _Request}, #wsState{stage = wsWsClosing, wsCloseDeadline = Deadline}) ->
+	gen_server:reply(From, {error, closing}),
+	continueWsClose(Deadline);
+handleMsg(_Msg, #wsState{stage = wsWsClosing, wsCloseDeadline = Deadline}) ->
+	continueWsClose(Deadline);
 handleMsg(Msg, #wsState{is_behavior = IsBehaviour} = State) ->
-   case IsBehaviour of
-      true ->
-         case Msg of
-            {'$gen_call', From, Request} ->
-               matchCallMsg(State, From, Request);
-            {'$gen_cast', Cast} ->
-               matchCastMsg(State, Cast);
-            _ ->
-               matchInfoMsg(State, Msg)
-         end;
-      _ ->
-         ?wsErr("~p info receive unexpect msg ~p ~n ", [?MODULE, Msg]),
-         kpS
-   end.
+	case IsBehaviour of
+		true ->
+			case Msg of
+				{'$gen_call', From, Request} ->
+					matchCallMsg(State, From, Request);
+				{'$gen_cast', Cast} ->
+					matchCastMsg(State, Cast);
+				_ ->
+					matchInfoMsg(State, Msg)
+			end;
+		_ ->
+			?wsErr("~p info receive unexpect msg ~p ~n ", [?MODULE, Msg]),
+			kpS
+	end.
+
+continueWsClose(Deadline) ->
+	case Deadline =< erlang:monotonic_time(millisecond) of
+		true -> {stop, normal};
+		false -> kpS
+	end.
 
 detectCleartextProtocol(Data, #wsState{buffer = Buffer} = State) ->
-   All = <<Buffer/binary, Data/binary>>,
-   Preface = <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>,
-   CheckLen = erlang:min(byte_size(All), byte_size(Preface)),
-   Prefix = binary:part(Preface, 0, CheckLen),
-   case binary:part(All, 0, CheckLen) =:= Prefix of
-      false ->
-         %% 不是HTTP/2 prior-knowledge，完整交回HTTP/1 parser。
-         handleMsg({tcp, State#wsState.socket, All}, State#wsState{protocol = http1, buffer = <<>>});
-      true when byte_size(All) < byte_size(Preface) ->
-         {ok, State#wsState{buffer = All}};
-      true ->
-         case startHttp2(State#wsState{buffer = <<>>}, http) of
-            {ok, H2State, NState} -> handleHttp2Data(All, H2State, NState);
-            {error, Reason} -> {stop, {http2_start, Reason}}
-         end
-   end.
+	All = <<Buffer/binary, Data/binary>>,
+	Preface = <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>,
+	CheckLen = erlang:min(byte_size(All), byte_size(Preface)),
+	Prefix = binary:part(Preface, 0, CheckLen),
+	case binary:part(All, 0, CheckLen) =:= Prefix of
+		false ->
+			%% 不是HTTP/2 prior-knowledge，完整交回HTTP/1 parser。
+			handleMsg({tcp, State#wsState.socket, All}, State#wsState{protocol = http1, buffer = <<>>});
+		true when byte_size(All) < byte_size(Preface) ->
+			{ok, State#wsState{buffer = All}};
+		true ->
+			case startHttp2(State#wsState{buffer = <<>>}, http) of
+				{ok, H2State, NState} -> handleHttp2Data(All, H2State, NState);
+				{error, Reason} -> {stop, {http2_start, Reason}}
+			end
+	end.
 
 sslProtocolState(SslSock, #wsState{http2Enabled = true} = State) ->
-   case ssl:negotiated_protocol(SslSock) of
-      {ok, <<"h2">>} ->
-         case startHttp2(State, https) of
-            {ok, _H2, NState} -> {ok, NState};
-            {error, Reason} -> {stop, {http2_start, Reason}}
-         end;
-      _ ->
-         {ok, State#wsState{protocol = http1}}
-   end;
+	case ssl:negotiated_protocol(SslSock) of
+		{ok, <<"h2">>} ->
+			case startHttp2(State, https) of
+				{ok, _H2, NState} -> {ok, NState};
+				{error, Reason} -> {stop, {http2_start, Reason}}
+			end;
+		_ ->
+			{ok, State#wsState{protocol = http1}}
+	end;
 sslProtocolState(_SslSock, State) ->
-   {ok, State#wsState{protocol = http1}}.
+	{ok, State#wsState{protocol = http1}}.
 
 startHttp2(#wsState{socket = Socket, wsMod = WsMod, maxSize = MaxBody, maxHeaderSize = MaxHeader} = State, Scheme) ->
-   H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout),
-   case wsHttp2:start(H20) of
-      {ok, H2} ->
-         NState = State#wsState{protocol = http2, h2State = H2, requestStartedAt = undefined, buffer = <<>>},
-         {ok, H2, NState};
-      {error, Reason} ->
-         {error, Reason}
-   end.
+	H20 = wsHttp2:new(Socket, WsMod, Scheme, MaxBody, MaxHeader, State#wsState.requestTimeout, State#wsState.http2MaxConcurrentStreams, State#wsState.http2ReceiveWindow),
+	case wsHttp2:start(H20) of
+		{ok, H2} ->
+			NState = State#wsState{protocol = http2, h2State = H2, requestStartedAt = undefined, buffer = <<>>},
+			{ok, H2, NState};
+		{error, Reason} ->
+			{error, Reason}
+	end.
 
 handleHttp2Data(Data, H2, State) ->
-   case wsHttp2:handleData(Data, H2) of
-      {ok, NH2} -> {ok, State#wsState{h2State = NH2}};
-      {stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
-   end.
+	case wsHttp2:handleData(Data, H2) of
+		{ok, NH2} -> {ok, State#wsState{h2State = NH2}};
+		{stop, Reason, NH2} -> {stop, Reason, State#wsState{h2State = NH2}}
+	end.
+
+handleWsClosingData(Data, #wsState{socket = Socket, wsCloseDeadline = Deadline} = State) ->
+	case Deadline =< erlang:monotonic_time(millisecond) of
+		true ->
+			{stop, normal};
+		false ->
+			case wsHttpProtocol:request(wsWsClosing, Data, Socket, State) of
+				{ok, NewState} -> {ok, NewState};
+				{close, normal, _NewState} -> {stop, normal};
+				{close, Reason, NewState} ->
+					maybeSendWsClose(NewState, Reason),
+					{stop, Reason};
+				_Other -> {stop, normal}
+			end
+	end.
+
+beginWsClose(State, Reason) ->
+	case maybeSendWsClose(State, {handler_close, Reason}) of
+		ok ->
+			Deadline = erlang:monotonic_time(millisecond) + 1000,
+			{ok, State#wsState{stage = wsWsClosing, wsParse = undefined,
+				buffer = <<>>, wsCloseDeadline = Deadline}};
+		_ ->
+			{stop, normal}
+	end.
 
 maybeSendWsClose(#wsState{stage = wsWs}, normal) ->
-   %% 正常Close handshake已在wsWebSocket中回显Close帧。
-   ok;
+	%% 正常Close handshake已在wsWebSocket中回显Close帧。
+	ok;
+maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, {handler_close, Reason}) ->
+	sendWsClose(Socket, Reason, 1000);
 maybeSendWsClose(#wsState{stage = wsWs, socket = Socket}, Reason) ->
-   Code =
-      case Reason of
-         message_too_big -> 1009;
-         invalid_utf8 -> 1007;
-         _ -> 1002
-      end,
-   try wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>)
-   catch _:_ -> ok
-   end,
-   ok;
+	sendWsClose(Socket, Reason, 1002);
 maybeSendWsClose(_State, _Reason) ->
-   ok.
+	ok.
+
+sendWsClose(Socket, Reason, DefaultCode) ->
+	Code =
+		case Reason of
+			message_too_big -> 1009;
+			invalid_utf8 -> 1007;
+			normal -> 1000;
+			_ -> DefaultCode
+		end,
+	try wsWebSocket:sendFrame(Socket, ?WsOpClose, <<Code:16>>)
+	catch _:_ -> {error, close_frame_failed}
+	end.
 
 terminate(Reason, #wsState{socket = Socket, wsMod = WsMod, webState = WebState,
-   is_behavior = IsBehavior, protocol = Protocol, h2State = H2State} = _State) ->
-   case {Protocol, H2State} of
-      {http2, H2} when is_map(H2) ->
-         try wsHttp2:terminate(H2)
-         catch _:_ -> ok
-         end;
-      _ ->
-         ok
-   end,
-   case IsBehavior andalso erlang:function_exported(WsMod, terminate, 2) of
-      true ->
-         try WsMod:terminate(Reason, WebState) catch _:_ -> ok end;
-      false ->
-         ok
-   end,
-   try wsNet:close(Socket)
-   catch _:_ -> ok
-   end,
-   %% 走到这里都是协议处理完后的主动关闭。proc_lib 只把
-   %% normal / shutdown / {shutdown, _} 视为正常结束，其它原因会打 CRASH REPORT。
-   exit(shutdown_reason(Reason)).
+	is_behavior = IsBehavior, protocol = Protocol, h2State = H2State} = _State) ->
+	case {Protocol, H2State} of
+		{http2, H2} when is_tuple(H2) ->
+			try wsHttp2:terminate(H2)
+			catch _:_ -> ok
+			end;
+		_ ->
+			ok
+	end,
+	case IsBehavior andalso erlang:function_exported(WsMod, terminate, 2) of
+		true ->
+			try WsMod:terminate(Reason, WebState) catch _:_ -> ok end;
+		false ->
+			ok
+	end,
+	try wsNet:close(Socket)
+	catch _:_ -> ok
+	end,
+	%% 走到这里都是协议处理完后的主动关闭。proc_lib 只把
+	%% normal / shutdown / {shutdown, _} 视为正常结束，其它原因会打 CRASH REPORT。
+	exit(shutdown_reason(Reason)).
 
 shutdown_reason(normal) -> normal;
 shutdown_reason(shutdown) -> shutdown;
 shutdown_reason({shutdown, _} = Reason) -> Reason;
 shutdown_reason(Reason) -> {shutdown, Reason}.
 
-ensureRequestStarted(#wsState{stage = wsWs} = State) ->
-   State;
-ensureRequestStarted(#wsState{requestStartedAt = undefined} = State) ->
-   State#wsState{requestStartedAt = erlang:monotonic_time(millisecond)};
-ensureRequestStarted(State) ->
-   State.
+markRequestStarted(#wsState{stage = wsWs}, State) ->
+	State;
+markRequestStarted(#wsState{requestStartedAt = undefined}, State) ->
+	State#wsState{requestStartedAt = erlang:monotonic_time(millisecond)};
+markRequestStarted(_OldState, State) ->
+	State.
 
 newWsState(WsState) ->
-   WsState#wsState{
-      stage = reqLine
-      , buffer = <<>>
-      , wsParse = undefined
-      , wsReq = undefined
-      , headerCnt = 0
-      , headerBytes = 0
-      , hostHeaderSeen = false
-      , temHeader = []
-      , contentLength = undefined
-      , bodyAcc = []
-      , bodySize = 0
-      , chunkState = size
-      , temChunked = <<>>
-      , requestStartedAt = undefined
-   }.
+	WsState#wsState{
+		stage = reqLine
+		, buffer = <<>>
+		, wsParse = undefined
+		, wsReq = undefined
+		, headerCnt = 0
+		, headerBytes = 0
+		, hostHeaderSeen = false
+		, reqConnClose = false
+		, reqConnKeepAlive = false
+		, temHeader = []
+		, contentLength = undefined
+		, bodyAcc = []
+		, bodySize = 0
+		, chunkState = size
+		, temChunked = <<>>
+		, requestStartedAt = undefined
+	}.
 
 %% @doc Execute the user callback, translating failure into a proper response.
 doHandle(State) ->
-   #wsState{wsMod = WsMod, method = Method, path = Path, wsReq = WsReq} = State,
-   try WsMod:handle(Method, Path, WsReq) of
-      %% {ok,...{file,...}}
-      {ok, Headers, {file, Filename}} ->
-         {file, 200, Headers, Filename, []};
-      {ok, Headers, {file, Filename, Range}} ->
-         {file, 200, Headers, Filename, Range};
-      %% ok simple
-      {ok, Headers, Body} -> {response, 200, Headers, Body};
-      {ok, Body} -> {response, 200, [], Body};
-      %% Chunk
-      {chunk, Headers} -> {chunk, Headers, <<"">>};
-      {chunk, Headers, Initial} -> {chunk, Headers, Initial};
-      %% WebSocket升级
-      {wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, Headers);
-      %% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
-      {HttpCode, Headers, {file, Filename}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
-         {file, HttpCode, Headers, Filename, []};
-      {HttpCode, Headers, {file, Filename, Range}}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
-         {file, HttpCode, Headers, Filename, Range};
-      %% Simple
-      {HttpCode, Headers, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
-         {response, HttpCode, Headers, Body};
-      {HttpCode, Body}
-         when is_integer(HttpCode), HttpCode >= 100, HttpCode =< 999 ->
-         {response, HttpCode, [], Body};
-      %% Unexpected
-      Unexpected ->
-         ?wsErr("handle return error WsReq:~p Ret:~p~n", [WsReq, Unexpected]),
-         {response, 500, [], <<"Internal server error">>}
-   catch
-      throw:{ResponseCode, Headers, Body}
-         when is_integer(ResponseCode), ResponseCode >= 100, ResponseCode =< 999 ->
-         {response, ResponseCode, Headers, Body};
-      throw:Exc:Stacktrace ->
-         ?wsErr("handle catch throw WsReq:~p R:~p S:~p~n", [WsReq, Exc, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>};
-      error:Error:Stacktrace ->
-         ?wsErr("handle catch error WsReq:~p R:~p S:~p~n", [WsReq, Error, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>};
-      exit:Exit:Stacktrace ->
-         ?wsErr("handle catch exit WsReq:~p R:~p S:~p~n", [WsReq, Exit, Stacktrace]),
-         {response, 500, [], <<"Internal server error">>}
-   end.
+	#wsState{wsMod = WsMod, method = Method, path = Path, wsReq = WsReq} = State,
+	try WsMod:handle(Method, Path, WsReq) of
+		%% {ok,...{file,...}}
+		{ok, Headers, {file, Filename}} ->
+			{file, 200, Headers, Filename, []};
+		{ok, Headers, {file, Filename, Range}} ->
+			{file, 200, Headers, Filename, Range};
+		%% ok simple
+		{ok, Headers, Body} -> {response, 200, Headers, Body};
+		{ok, Body} -> {response, 200, [], Body};
+		%% Chunk
+		{chunk, Headers} -> {chunk, Headers, <<"">>};
+		{chunk, Headers, Initial} -> {chunk, Headers, Initial};
+		%% WebSocket升级
+		{wsUpgrade, Headers} -> wsWebSocket:handleUpgrade(WsMod, WsReq, Headers);
+		%% File。Range=[] 表示整文件；勿传 {0,0}，那会被当成显式空范围。
+		{HttpCode, Headers, {file, Filename}}
+			when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
+			{file, HttpCode, Headers, Filename, []};
+		{HttpCode, Headers, {file, Filename, Range}}
+			when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
+			{file, HttpCode, Headers, Filename, Range};
+		%% Simple
+		{HttpCode, Headers, Body}
+			when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
+			{response, HttpCode, Headers, Body};
+		{HttpCode, Body}
+			when is_integer(HttpCode), HttpCode >= 200, HttpCode =< 999 ->
+			{response, HttpCode, [], Body};
+		%% Unexpected
+		Unexpected ->
+			?wsErr("handle return error Req:~p RetShape:~p~n",
+				[requestLogInfo(WsReq), returnShape(Unexpected)]),
+			{response, 500, [], <<"Internal server error">>}
+	catch
+		throw:{ResponseCode, Headers, Body}
+			when is_integer(ResponseCode), ResponseCode >= 200, ResponseCode =< 999 ->
+			{response, ResponseCode, Headers, Body};
+		throw:Exc:Stacktrace ->
+			?wsErr("handle catch throw Req:~p R:~P S:~P~n",
+				[requestLogInfo(WsReq), Exc, 8, Stacktrace, 12]),
+			{response, 500, [], <<"Internal server error">>};
+		error:Error:Stacktrace ->
+			?wsErr("handle catch error Req:~p R:~P S:~P~n",
+				[requestLogInfo(WsReq), Error, 8, Stacktrace, 12]),
+			{response, 500, [], <<"Internal server error">>};
+		exit:Exit:Stacktrace ->
+			?wsErr("handle catch exit Req:~p R:~P S:~P~n",
+				[requestLogInfo(WsReq), Exit, 8, Stacktrace, 12]),
+			{response, 500, [], <<"Internal server error">>}
+	end.
 
-%% Inject compression for normal responses
-doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version) ->
-   Norm0 = normalizeH1Headers(UserHeaders0),
-   {SBody, UserHeaders1} = tryCompressResponse(Body, Norm0, ReqHeaders, Code, Method),
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, UserHeaders1)),
-   NHeaders = normalizeContentLength(Code, Method, iolist_size(SBody), UserHeaders),
-   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
-   Headers = addConnectionHeader(NHeaders, Policy, Version),
-   case sendResponse(Socket, Method, Code, Headers, SBody) of
-      ok -> Policy;
-      _ -> close
-   end;
-doResponse({chunk, UserHeaders0, Initial}, Socket, ReqHeaders, Method, Version) ->
-   %% chunk framing由框架生成，因此Content-Length和业务层自带的
-   %% Transfer-Encoding都必须移除，避免线路格式与响应头声明不一致。
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
-   Policy = connectionPolicy(UserHeaders, ReqHeaders, Version),
-   ResponseHeaders = addConnectionHeader(
-      [{<<"Transfer-Encoding">>, <<"chunked">>} | UserHeaders], Policy, Version),
-   case sendResponse(Socket, Method, 200, ResponseHeaders, <<>>) of
-      ok ->
-         case Method of
-            'HEAD' ->
-               Policy;
-            _ ->
-               %% 客户端在流式响应过程中断开时必须结束连接进程。
-               %% 之前把 chunk loop 的结果丢掉、总是返回 keep-alive，进程会泄漏。
-               %% sendChunk/2 本身正确处理空 iolist；不要用 orelse 连接其
-               %% ok/{error,_} 返回值，否则非空 Initial 会触发 badarg。
-               Sent = sendChunk(Socket, Initial),
-               case Sent of
-                  {error, _} ->
-                     close;
-                  _ ->
-                     case startChunkLoop(Socket) of
-                        ok -> Policy;
-                        {error, _} -> close
-                     end
-               end
-         end;
-      _ ->
-         close
-   end;
+%% 异常日志不能把几 MB request body / 巨型 handler 返回值完整格式化。
+%% 只保留定位问题需要的元数据，避免错误风暴反过来放大 CPU/内存/日志 IO。
+requestLogInfo(#wsReq{method = Method, path = Path, version = Version, headers = Headers, body = Body}) ->
+	{Method, Path, Version, length(Headers), safeBodySize(Body)}.
+
+safeBodySize(Body) ->
+	try iolist_size(Body) catch _:_ -> unknown end.
+
+returnShape(Term) when is_binary(Term) -> {binary, byte_size(Term)};
+returnShape(Term) when is_list(Term) -> list;
+returnShape(Term) when is_map(Term) -> {map, map_size(Term)};
+returnShape(Term) when is_tuple(Term), tuple_size(Term) > 0 ->
+	case element(1, Term) of
+		Tag when is_atom(Tag) -> {tuple, tuple_size(Term), Tag};
+		_ -> {tuple, tuple_size(Term)}
+	end;
+returnShape(Term) when is_atom(Term) -> Term;
+returnShape(Term) when is_integer(Term) -> integer;
+returnShape(Term) when is_float(Term) -> float;
+returnShape(_) -> other.
+
+%% Inject compression for normal responses.
+%% 用户响应头只扫描一次，完成规范化、安全校验、框架自管头剔除和Connection语义提取。
+doResponse({response, Code, UserHeaders0, Body}, Socket, ReqHeaders, Method, Version, ReqConn) ->
+	{UserHeaders0a, UserClose} = prepareResponseHeaders(UserHeaders0),
+	BodySize0 = iolist_size(Body),
+	{SBody, UserHeaders1, BodySize} =
+		tryCompressResponseSized(Body, BodySize0, UserHeaders0a, ReqHeaders, Code, Method),
+	NHeaders = normalizeContentLength(Code, Method, BodySize, UserHeaders1),
+	Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+	Headers = addConnectionHeaderPrepared(NHeaders, Policy, Version),
+	case sendPreparedResponse(Socket, Method, Code, Headers, SBody) of
+		ok -> Policy;
+		_ -> close
+	end;
+doResponse({chunk, UserHeaders0, Initial}, Socket, _ReqHeaders, Method, Version, ReqConn) ->
+	%% framing headers由框架生成；prepareResponseHeaders/1 同时完成安全校验。
+	{UserHeaders, UserClose} = prepareResponseHeaders(UserHeaders0),
+	Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+	ResponseHeaders = addConnectionHeaderPrepared(
+		[{<<"Transfer-Encoding">>, <<"chunked">>} | UserHeaders], Policy, Version),
+	case sendPreparedResponse(Socket, Method, 200, ResponseHeaders, <<>>) of
+		ok ->
+			case Method of
+				'HEAD' ->
+					Policy;
+				_ ->
+					%% 客户端在流式响应过程中断开时必须结束连接进程。
+					%% 之前把 chunk loop 的结果丢掉、总是返回 keep-alive，进程会泄漏。
+					%% sendChunk/2 本身正确处理空 iolist；不要用 orelse 连接其
+					%% ok/{error,_} 返回值，否则非空 Initial 会触发 badarg。
+					Sent = sendChunk(Socket, Initial),
+					case Sent of
+						{error, _} ->
+							close;
+						_ ->
+							case startChunkLoop(Socket) of
+								ok -> Policy;
+								{error, _} -> close
+							end
+					end
+			end;
+		_ -> close
+	end;
 %% WebSocket升级响应
-doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version) ->
-   case sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>) of
-      ok -> keep_ws;
-      _ -> close
-   end;
-doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, ReqHeaders, Method, Version) ->
-   Policy = connectionPolicy(UserHeaders0, ReqHeaders, Version),
-   %% 文件响应由框架确定长度/Range，不能保留业务层自带TE或CL。
-   UserHeaders = deleteHeader(<<"Transfer-Encoding">>,
-      deleteHeader(<<"Content-Length">>, normalizeH1Headers(UserHeaders0))),
-   ResponseHeaders = addConnectionHeader(UserHeaders, Policy, Version),
-   case wsUtil:fileSize(Filename) of
-      {error, _FileError} ->
-         sendSrvError(Socket),
-         {stop, file_error};
-      Size ->
-         Ret =
-            case wsUtil:normalizeRange(Range, Size) of
-               undefined ->
-                  FileHeaders = [{<<"Content-Length">>, Size} | ResponseHeaders],
-                  case Method of
-                     'HEAD' -> sendResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
-                     _ -> sendFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
-                  end;
-               {Offset, Length} ->
-                  ERange = wsUtil:encodeRange({Offset, Length}, Size),
-                  FileHeaders = [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange} | ResponseHeaders],
-                  case Method of
-                     'HEAD' -> sendResponse(Socket, Method, 206, FileHeaders, <<>>);
-                     _ -> sendFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
-                  end;
-               invalid_range ->
-                  ERange = wsUtil:encodeRange(invalid_range, Size),
-                  sendResponse(Socket, Method, 416,
-                     [{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>)
-            end,
-         case Ret of
-            ok -> Policy;
-            _Err -> {stop, Ret}
-         end
-   end.
+doResponse({wsWebSocket, UserHeaders}, Socket, _ReqHeaders, _Method, _Version, _ReqConn) ->
+	case sendResponse(Socket, 'GET', 101, normalizeH1Headers(UserHeaders), <<>>) of
+		ok -> keep_ws;
+		_ -> close
+	end;
+doResponse({file, ResponseCode, UserHeaders0, Filename, Range}, Socket, _ReqHeaders, Method, Version, ReqConn) ->
+	%% 文件响应由框架确定长度/Range；用户头只扫描一次。
+	{UserHeaders, UserClose} = prepareResponseHeaders(UserHeaders0),
+	Policy = connectionPolicyPrepared(UserClose, ReqConn, Version),
+	ResponseHeaders = addConnectionHeaderPrepared(UserHeaders, Policy, Version),
+	case wsUtil:fileSize(Filename) of
+		{error, _FileError} ->
+			sendSrvError(Socket),
+			{stop, file_error};
+		Size ->
+			Ret =
+				case wsUtil:normalizeRange(Range, Size) of
+					undefined ->
+						FileHeaders = [{<<"Content-Length">>, Size} | ResponseHeaders],
+						case Method of
+							'HEAD' -> sendPreparedResponse(Socket, Method, ResponseCode, FileHeaders, <<>>);
+							_ -> sendPreparedFile(Socket, ResponseCode, FileHeaders, Filename, {0, 0})
+						end;
+					{Offset, Length} ->
+						ERange = wsUtil:encodeRange({Offset, Length}, Size),
+						FileHeaders = [{<<"Content-Length">>, Length}, {<<"Content-Range">>, ERange} | ResponseHeaders],
+						case Method of
+							'HEAD' -> sendPreparedResponse(Socket, Method, 206, FileHeaders, <<>>);
+							_ -> sendPreparedFile(Socket, 206, FileHeaders, Filename, {Offset, Length})
+						end;
+					invalid_range ->
+						ERange = wsUtil:encodeRange(invalid_range, Size),
+						sendPreparedResponse(Socket, Method, 416,
+							[{<<"Content-Length">>, 0}, {<<"Content-Range">>, ERange} | ResponseHeaders], <<>>)
+				end,
+			case Ret of
+				ok -> Policy;
+				_Err -> {stop, Ret}
+			end
+	end.
 
 normalizeContentLength(Code, _Method, _BodySize, Headers) when Code >= 100, Code < 200 ->
-   Headers;
+	Headers;
 normalizeContentLength(204, _Method, _BodySize, Headers) ->
-   Headers;
+	Headers;
 normalizeContentLength(304, _Method, _BodySize, Headers) ->
-   Headers;
+	Headers;
 normalizeContentLength(205, _Method, _BodySize, Headers) ->
-   [{<<"Content-Length">>, 0} | Headers];
+	[{<<"Content-Length">>, 0} | Headers];
 normalizeContentLength(_Code, _Method, BodySize, Headers) ->
-   [{<<"Content-Length">>, BodySize} | Headers].
+	[{<<"Content-Length">>, BodySize} | Headers].
 
 %% @doc Generate a HTTP response and send it to the client.
 sendResponse(Socket, Method, Code, Headers, UserBody) ->
-   Body =
-      case Method of
-         'HEAD' ->
-            <<>>;
-         _ ->
-            case Code of
-               304 ->
-                  <<>>;
-               204 ->
-                  <<>>;
-               205 ->
-                  <<>>;
-               _ ->
-                  UserBody
-            end
-      end,
-
-   Response = httpResponse(Code, Headers, Body),
+	Body = responseBody(Method, Code, UserBody),
+	Response = httpResponse(Code, Headers, Body),
 	wsNet:send(Socket, Response).
-   %%case wsNet:send(Socket, Response) of
-   %%   ok ->
-   %%      ok;
-   %%   {error, Reason} when Reason =:= closed; Reason =:= econnreset; Reason =:= epipe; Reason =:= einval ->
-   %%      %% 对端在响应写完之前就断开：压测(如 wrk)收尾、浏览器提前导航、客户端主动 close 都会这样。
-   %%      %% 这是正常事件而非服务端故障——连接状态机照常走 close。若按 ERROR 记，
-   %%      %% 真实服务上这类日志会持续累积，把真正的写失败淹掉。
-   %%      ?wsWarn("send_response skipped, peer gone: ~p~n", [Reason]),
-   %%      {error, Reason};
-   %%   _Err ->
-   %%       ?wsErr("send_response error ~p~n", [_Err]),
-   %%      _Err
-   %%end.
+
+%% Normal-response hot path. Headers are already normalized and validated by
+%% prepareResponseHeaders/1; framework-owned headers are trusted values.
+sendPreparedResponse(Socket, Method, Code, Headers, UserBody) ->
+	Body = responseBody(Method, Code, UserBody),
+	Response = [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellPreparedHeaders(Headers), <<"\r\n">>, Body],
+	wsNet:send(Socket, Response).
+
+responseHeadersForCode(Code, Headers) when Code >= 100, Code < 200 ->
+	%% 1xx responses cannot carry framing headers such as Content-Length or
+	%% Transfer-Encoding. Preserve optional fields explicitly supplied by the handler.
+	[Header || {Name, _} = Header <- Headers, not wsUtil:headerNameEq(Name, <<"Content-Length">>), not wsUtil:headerNameEq(Name, <<"Transfer-Encoding">>)];
+responseHeadersForCode(_Code, Headers) ->
+	Headers.
+
+responseBody('HEAD', _Code, _UserBody) ->
+	<<>>;
+responseBody(_Method, Code, _UserBody) when Code >= 100, Code < 200 ->
+	<<>>;
+responseBody(_Method, 304, _UserBody) ->
+	<<>>;
+responseBody(_Method, 204, _UserBody) ->
+	<<>>;
+responseBody(_Method, 205, _UserBody) ->
+	<<>>;
+responseBody(_Method, _Code, UserBody) ->
+	UserBody.
+%%case wsNet:send(Socket, Response) of
+%%   ok ->
+%%      ok;
+%%   {error, Reason} when Reason =:= closed; Reason =:= econnreset; Reason =:= epipe; Reason =:= einval ->
+%%      %% 对端在响应写完之前就断开：压测(如 wrk)收尾、浏览器提前导航、客户端主动 close 都会这样。
+%%      %% 这是正常事件而非服务端故障——连接状态机照常走 close。若按 ERROR 记，
+%%      %% 真实服务上这类日志会持续累积，把真正的写失败淹掉。
+%%      ?wsWarn("send_response skipped, peer gone: ~p~n", [Reason]),
+%%      {error, Reason};
+%%   _Err ->
+%%       ?wsErr("send_response error ~p~n", [_Err]),
+%%      _Err
+%%end.
 
 %% helpers for compression
 tryCompressResponse(Body, UserHeaders, ReqHeaders, Code, Method) ->
-   BodySize = iolist_size(Body),
-   Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205) orelse (Code =:= 304) orelse BodySize < 1024,
-   case Skip of
-      true ->
-         {Body, UserHeaders};
-      false ->
-         case findHeader(<<"Content-Encoding">>, UserHeaders) of
-            false ->
-               case chooseContentEncoding(ReqHeaders) of
-                  none ->
-                     {Body, UserHeaders};
-                  gzip ->
-                     CBody = zlib:gzip(iolist_to_binary(Body)),
-                     {CBody, addVary([{<<"Content-Encoding">>, <<"gzip">>} | UserHeaders])};
-                  deflate ->
-                     CBody = zlib:compress(iolist_to_binary(Body)),
-                     {CBody, addVary([{<<"Content-Encoding">>, <<"deflate">>} | UserHeaders])}
-               end;
-            _ ->
-               {Body, UserHeaders}
-         end
-   end.
+	BodySize = iolist_size(Body),
+	{SBody, SHeaders, _Size} =
+		tryCompressResponseSized(Body, BodySize, UserHeaders, ReqHeaders, Code, Method),
+	{SBody, SHeaders}.
+
+tryCompressResponseSized(Body, BodySize, UserHeaders, ReqHeaders, Code, Method) ->
+	Skip = (Method =:= 'HEAD') orelse (Code =:= 204) orelse (Code =:= 205)
+		orelse (Code =:= 304) orelse BodySize < 1024,
+	case Skip of
+		true ->
+			{Body, UserHeaders, BodySize};
+		false ->
+			case findHeader(<<"Content-Encoding">>, UserHeaders) of
+				false ->
+					case chooseContentEncoding(ReqHeaders) of
+						none ->
+							{Body, UserHeaders, BodySize};
+						gzip ->
+							CBody = zlib:gzip(iolist_to_binary(Body)),
+							{CBody, addVary([{<<"Content-Encoding">>, <<"gzip">>} | UserHeaders]), byte_size(CBody)};
+						deflate ->
+							CBody = zlib:compress(iolist_to_binary(Body)),
+							{CBody, addVary([{<<"Content-Encoding">>, <<"deflate">>} | UserHeaders]), byte_size(CBody)}
+					end;
+				_ ->
+					{Body, UserHeaders, BodySize}
+			end
+	end.
 
 chooseContentEncoding(ReqHeaders) ->
-   case findHeader(<<"Accept-Encoding">>, ReqHeaders) of
-      false ->
-         none;
-      {_, Value} ->
-         Encodings = parseAcceptEncodings(iolist_to_binary(Value)),
-         GzipQ = encodingQ(<<"gzip">>, Encodings),
-         DeflateQ = encodingQ(<<"deflate">>, Encodings),
-         case {GzipQ, DeflateQ} of
-            {G, D} when G > 0, G >= D -> gzip;
-            {_G, D} when D > 0 -> deflate;
-            _ -> none
-         end
-   end.
+	%% decode_packet/H2 compatibility layer both expose the standard header as
+	%% 'Accept-Encoding'. Common path is a single keyfind; binary fallback keeps
+	%% compatibility with hand-built request records.
+	Header = case lists:keyfind('Accept-Encoding', 1, ReqHeaders) of
+		{_, _} = Found -> Found;
+		false -> findHeader(<<"Accept-Encoding">>, ReqHeaders)
+	end,
+	case Header of
+		false ->
+			none;
+		{_, Value0} ->
+			{GzipQ, DeflateQ} = acceptEncodingQ(iolist_to_binary(Value0)),
+			case {GzipQ, DeflateQ} of
+				{G, D} when G > 0, G >= D -> gzip;
+				{_G, D} when D > 0 -> deflate;
+				_ -> none
+			end
+	end.
 
-parseAcceptEncodings(Value) ->
-   [
-      begin
-         Parts = [string:trim(P) || P <- binary:split(string:lowercase(Token), <<";">>, [global])],
-         case Parts of
-            [Encoding] -> {Encoding, 1000};
-            [Encoding | Params] -> {Encoding, parseEncodingQ(Params)}
-         end
-      end
-      || Token <- binary:split(Value, <<",">>, [global])
-   ].
+acceptEncodingQ(Value) ->
+	Tokens = binary:split(Value, <<",">>, [global]),
+	{G0, D0, Star, GSeen, DSeen} =
+		acceptEncodingQ(Tokens, 0, 0, 0, false, false),
+	G = case GSeen of true -> G0; false -> Star end,
+	D = case DSeen of true -> D0; false -> Star end,
+	{G, D}.
 
-parseEncodingQ(Params) ->
-   case [V || P <- Params, [K, V] <- [binary:split(P, <<"=">>)], string:trim(K) =:= <<"q">>] of
-      [Q | _] -> qValue(string:trim(Q));
-      [] -> 1000
-   end.
+acceptEncodingQ([], G, D, Star, GSeen, DSeen) ->
+	{G, D, Star, GSeen, DSeen};
+acceptEncodingQ([Token0 | Rest], G, D, Star, GSeen, DSeen) ->
+	Parts = binary:split(Token0, <<";">>, [global]),
+	[Name0 | Params] = Parts,
+	Name = string:trim(Name0),
+	Q = parseEncodingQ(Params),
+	case true of
+		_ when GSeen =:= false ->
+			case wsUtil:headerNameEq(Name, <<"gzip">>) of
+				true -> acceptEncodingQ(Rest, Q, D, Star, true, DSeen);
+				false -> acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen)
+			end;
+		_ ->
+			acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen)
+	end.
+
+acceptEncodingQOther(Name, Q, Rest, G, D, Star, GSeen, DSeen) ->
+	case {DSeen, wsUtil:headerNameEq(Name, <<"deflate">>)} of
+		{false, true} ->
+			acceptEncodingQ(Rest, G, Q, Star, GSeen, true);
+		_ ->
+			case wsUtil:headerNameEq(Name, <<"*">>) of
+				true -> acceptEncodingQ(Rest, G, D, Q, GSeen, DSeen);
+				false -> acceptEncodingQ(Rest, G, D, Star, GSeen, DSeen)
+			end
+	end.
+
+parseEncodingQ([]) ->
+	1000;
+parseEncodingQ([Param | Rest]) ->
+	case binary:split(Param, <<"=">>) of
+		[K, V] ->
+			case wsUtil:headerNameEq(string:trim(K), <<"q">>) of
+				true -> qValue(string:trim(V));
+				false -> parseEncodingQ(Rest)
+			end;
+		_ ->
+			parseEncodingQ(Rest)
+	end.
 
 qValue(<<"0">>) -> 0;
 qValue(<<"1">>) -> 1000;
 qValue(<<"0.", Digits/binary>>) -> fractionQ(Digits);
 qValue(<<"1.", Digits/binary>>) ->
-   case allZero(Digits) of true -> 1000; false -> 0 end;
+	case allZero(Digits) of true -> 1000; false -> 0 end;
 qValue(_) -> 0.
 
 fractionQ(Digits0) ->
-   Digits = binary:part(<<Digits0/binary, "000">>, 0, 3),
-   try binary_to_integer(Digits) catch _:_ -> 0 end.
+	Digits = binary:part(<<Digits0/binary, "000">>, 0, 3),
+	try binary_to_integer(Digits) catch _:_ -> 0 end.
 
 allZero(<<>>) -> true;
 allZero(<<$0, Rest/binary>>) -> allZero(Rest);
 allZero(_) -> false.
 
-encodingQ(Name, Encodings) ->
-   case lists:keyfind(Name, 1, Encodings) of
-      {_, Q} -> Q;
-      false ->
-         case lists:keyfind(<<"*">>, 1, Encodings) of
-            {_, Q} -> Q;
-            false -> 0
-         end
-   end.
 
 addVary(Hs) ->
-   case findHeader(<<"Vary">>, Hs) of
-      false ->
-         [{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
-      {Key, Value} ->
-         case lists:any(
-            fun(T) -> wsUtil:headerNameEq(string:trim(T), <<"Accept-Encoding">>) end,
-            binary:split(iolist_to_binary(Value), <<",">>, [global])
-         ) of
-            true -> Hs;
-            false -> lists:keyreplace(Key, 1, Hs, {Key, [Value, <<", Accept-Encoding">>]})
-         end
-   end.
+	case findHeader(<<"Vary">>, Hs) of
+		false ->
+			[{<<"Vary">>, <<"Accept-Encoding">>} | Hs];
+		{Key, Value} ->
+			case lists:any(
+				fun(T) -> wsUtil:headerNameEq(string:trim(T), <<"Accept-Encoding">>) end,
+				binary:split(iolist_to_binary(Value), <<",">>, [global])
+			) of
+				true -> Hs;
+				false -> lists:keyreplace(Key, 1, Hs, {Key, [Value, <<", Accept-Encoding">>]})
+			end
+	end.
 
 %% @doc Send a HTTP response to the client where the body is the
 %% contents of the given file. Assumes correctly set response code
 %% and headers.
 -spec sendFile(Socket, Code, Headers, Filename, Range) -> ok | {error, term()} when
-   Socket :: wsSocket(),
-   Code :: wsHttpCode(),
-   Headers :: wsHeaders(),
-   Filename :: file:filename(),
-   Range :: wsUtil:range().
+	Socket :: wsSocket(),
+	Code :: wsHttpCode(),
+	Headers :: wsHeaders(),
+	Filename :: file:filename(),
+	Range :: wsUtil:range().
 sendFile(Socket, Code, Headers, Filename, Range) ->
-   ResponseHeaders = httpResponse(Code, Headers, <<>>),
-   case file:open(Filename, [read, raw, binary]) of
-      {ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
-      {error, _FileError} = Err ->
-         sendSrvError(Socket),
-         Err
-   end.
+	ResponseHeaders = httpResponse(Code, Headers, <<>>),
+	case file:open(Filename, [read, raw, binary]) of
+		{ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
+		{error, _FileError} = Err ->
+			sendSrvError(Socket),
+			Err
+	end.
+
+sendPreparedFile(Socket, Code, Headers, Filename, Range) ->
+	WireHeaders = responseHeadersForCode(Code, Headers),
+	ResponseHeaders = [
+		<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>,
+		spellPreparedHeaders(WireHeaders), <<"\r\n">>
+	],
+	case file:open(Filename, [read, raw, binary]) of
+		{ok, Fd} -> doSendFile(Fd, Range, Socket, ResponseHeaders);
+		{error, _FileError} = Err ->
+			sendSrvError(Socket),
+			Err
+	end.
 
 doSendFile(Fd, {Offset, Length}, Socket, Headers) ->
-   try wsNet:send(Socket, Headers) of
-      ok ->
-         case wsNet:sendfile(Fd, Socket, Offset, Length, []) of
-            {ok, _BytesSent} ->
-               ok;
-            {error, Reason} = Error ->
-               ?wsErr("send file error ~p", [Reason]),
-               Error
-         end;
-      {error, Reason} = Error ->
-         ?wsErr("send file header error ~p", [Reason]),
-         Error
-   after
-      file:close(Fd)
-   end.
+	try wsNet:send(Socket, Headers) of
+		ok ->
+			case wsNet:sendfile(Fd, Socket, Offset, Length, []) of
+				{ok, _BytesSent} ->
+					ok;
+				{error, Reason} = Error ->
+					?wsErr("send file error ~p", [Reason]),
+					Error
+			end;
+		{error, Reason} = Error ->
+			?wsErr("send file header error ~p", [Reason]),
+			Error
+	after
+		file:close(Fd)
+	end.
 
 %% @doc To send a response, we must first have received everything the
 %% client is sending. If this is not the case, {@link send_bad_request/1}
 %% might reset the client connection.
 sendBadRequest(Socket) ->
-   sendRescueResponse(Socket, 400, <<"Bad Request">>).
+	sendRescueResponse(Socket, 400, <<"Bad Request">>).
 
 sendSrvError(Socket) ->
-   sendRescueResponse(Socket, 500, <<"Server Error">>).
+	sendRescueResponse(Socket, 500, <<"Server Error">>).
 
 sendRescueResponse(Socket, Code, Body) ->
-   Response = httpResponse(Code, Body),
-   wsNet:send(Socket, Response).
+	Response = httpResponse(Code, Body),
+	wsNet:send(Socket, Response).
 
 %% CHUNKED-TRANSFER
 %% @doc The chunk loop is an intermediary between the socket and the
@@ -936,183 +1087,270 @@ sendRescueResponse(Socket, Code, Body) ->
 %% empty response, which signals that the connection should be
 %% closed. When the client closes the socket, the loop exits.
 startChunkLoop(Socket) ->
-   %% Set the socket to active so we receive the tcp_closed message
-   %% if the client closes the connection
-   wsNet:setopts(Socket, [{active, ?ActionN}]),
-   ?MODULE:chunkLoop(Socket).
+	%% Streaming期间只预读一个客户端包：既能在空闲时及时收到 *_closed，
+	%% 又不会因为客户端持续pipeline而无限把请求数据搬进本进程mailbox。
+	%% 一旦收到数据，{active,1} 自动转回passive，内核接收缓冲自然形成背压。
+	case wsNet:setopts(Socket, [{active, 1}]) of
+		ok -> ?MODULE:chunkLoop(Socket);
+		{error, Reason} -> {error, {setopts, Reason}}
+	end.
 
 chunkLoop(Socket) ->
-   receive
-      {tcp_closed, Socket} ->
-         {error, client_closed};
-      {ssl_closed, Socket} ->
-         {error, client_closed};
-      {tcp_error, Socket, _Reason} ->
-         {error, client_closed};
-      {ssl_error, Socket, _Reason} ->
-         {error, client_closed};
-      {tcp_passive, Socket} ->
-         wsNet:setopts(Socket, [{active, ?ActionN}]),
-         ?MODULE:chunkLoop(Socket);
-      {ssl_passive, Socket} ->
-         wsNet:setopts(Socket, [{active, ?ActionN}]),
-         ?MODULE:chunkLoop(Socket);
-      {chunk, close} ->
-         case wsNet:send(Socket, <<"0\r\n\r\n">>) of
-            ok ->
-               ok;
-            {error, _Reason} ->
-               {error, client_closed}
-         end;
-      {chunk, close, From} ->
-         case wsNet:send(Socket, <<"0\r\n\r\n">>) of
-            ok ->
-               From ! {self(), ok},
-               ok;
-            {error, _Reason} ->
-               From ! {self(), {error, closed}},
-               {error, client_closed}
-         end;
-      {chunk, Data} ->
-         case sendChunk(Socket, Data) of
-            ok -> ?MODULE:chunkLoop(Socket);
-            {error, _} -> {error, client_closed}
-         end;
-      {chunk, Data, From} ->
-         case sendChunk(Socket, Data) of
-            ok ->
-               From ! {self(), ok},
-               ?MODULE:chunkLoop(Socket);
-            {error, _} ->
-               From ! {self(), {error, closed}},
-               {error, client_closed}
-         end
-   end.
+	receive
+		{tcp_closed, Socket} ->
+			{error, client_closed};
+		{ssl_closed, Socket} ->
+			{error, client_closed};
+		{tcp_error, Socket, _Reason} ->
+			{error, client_closed};
+		{ssl_error, Socket, _Reason} ->
+			{error, client_closed};
+		{'EXIT', _Pid, Reason} ->
+			%% 常见 producer 会 spawn_link 到连接进程。若 producer 在发送 close
+			%% 前异常退出，不能永远卡在 chunkLoop 等一个不会到来的消息。
+			{error, {stream_producer_exit, Reason}};
+		{tcp_passive, Socket} ->
+			%% 不在stream期间继续re-arm；否则未匹配的pipeline数据会无界堆mailbox。
+			?MODULE:chunkLoop(Socket);
+		{ssl_passive, Socket} ->
+			?MODULE:chunkLoop(Socket);
+		{chunk, close} ->
+			case wsNet:send(Socket, <<"0\r\n\r\n">>) of
+				ok ->
+					case wsNet:setopts(Socket, [{active, ?ActionN}]) of
+						ok -> ok;
+						{error, Reason} -> {error, {setopts, Reason}}
+					end;
+				{error, _Reason} ->
+					{error, client_closed}
+			end;
+		{chunk, close, From} ->
+			case wsNet:send(Socket, <<"0\r\n\r\n">>) of
+				ok ->
+					case wsNet:setopts(Socket, [{active, ?ActionN}]) of
+						ok ->
+							From ! {self(), ok},
+							ok;
+						{error, Reason} ->
+							From ! {self(), {error, closed}},
+							{error, {setopts, Reason}}
+					end;
+				{error, _Reason} ->
+					From ! {self(), {error, closed}},
+					{error, client_closed}
+			end;
+		{chunk, Data} ->
+			case sendChunk(Socket, Data) of
+				ok -> ?MODULE:chunkLoop(Socket);
+				{error, _} -> {error, client_closed}
+			end;
+		{chunk, Data, From} ->
+			case sendChunk(Socket, Data) of
+				ok ->
+					From ! {self(), ok},
+					?MODULE:chunkLoop(Socket);
+				{error, _} ->
+					From ! {self(), {error, closed}},
+					{error, client_closed}
+			end
+	end.
 
 sendChunk(Socket, Data) ->
-   case iolist_size(Data) of
-      0 -> ok;
-      Size ->
-         Response = [integer_to_binary(Size, 16), <<"\r\n">>, Data, <<"\r\n">>],
-         wsNet:send(Socket, Response)
-   end.
+	case iolist_size(Data) of
+		0 -> ok;
+		Size ->
+			Response = [integer_to_binary(Size, 16), <<"\r\n">>, Data, <<"\r\n">>],
+			wsNet:send(Socket, Response)
+	end.
 
 maybeSendContinue(Socket, Headers) ->
-   %% decode_packet 已知头表不含 Expect，未收录头以 binary 键返回。
-   case getExpect(Headers) of
-      undefined ->
-         ok;
-      Value ->
-         case wsUtil:headerNameEq(iolist_to_binary(Value), <<"100-continue">>) of
-            true ->
-               wsNet:send(Socket, httpResponse(100));
-            false ->
-               ok
-         end
-   end.
+	%% decode_packet 已知头表不含 Expect，未收录头以 binary 键返回。
+	case getExpect(Headers) of
+		undefined ->
+			ok;
+		Value ->
+			case wsUtil:headerNameEq(string:trim(iolist_to_binary(Value)), <<"100-continue">>) of
+				true ->
+					wsNet:send(Socket, [<<"HTTP/1.1 ">>, status(100), <<"\r\n\r\n">>]);
+				false ->
+					{error, unsupported_expectation}
+			end
+	end.
 
 getExpect(Headers) ->
-   case findHeader(<<"Expect">>, Headers) of
-      false -> undefined;
-      {_, Value} -> Value
-   end.
-
-httpResponse(Code) ->
-   httpResponse(Code, <<>>).
+	case findHeader(<<"Expect">>, Headers) of
+		false -> undefined;
+		{_, Value} -> Value
+	end.
 
 httpResponse(Code, Body) ->
-   httpResponse(Code, [{<<"Content-Length">>, size(Body)}], Body).
+	Headers = case Code >= 100 andalso Code < 200 of
+		true -> [];
+		false -> [{<<"Content-Length">>, size(Body)}]
+	end,
+	httpResponse(Code, Headers, Body).
 
 httpResponse(Code, Headers, Body) ->
-   [<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(Headers), <<"\r\n">>, Body].
+	WireHeaders = responseHeadersForCode(Code, Headers),
+	[<<"HTTP/1.1 ">>, status(Code), <<"\r\n">>, spellHeaders(WireHeaders), <<"\r\n">>, Body].
 
 spellHeaders(Headers) ->
-   [[Name, <<": ">>, Value, <<"\r\n">>]
-      || Header <- Headers,
-         {ok, Name, Value} <- [wireHeader(Header)]].
+	[[Name, <<": ">>, Value, <<"\r\n">>]
+		|| Header <- Headers,
+		{ok, Name, Value} <- [wireHeader(Header)]].
+
+spellPreparedHeaders(Headers) ->
+	[[Name, <<": ">>, preparedHeaderValue(Value), <<"\r\n">>] || {Name, Value} <- Headers].
+
+preparedHeaderValue(Value) when is_binary(Value) -> Value;
+preparedHeaderValue(Value) when is_integer(Value) -> integer_to_binary(Value);
+preparedHeaderValue(Value) when is_atom(Value) -> atom_to_binary(Value);
+preparedHeaderValue(Value) when is_list(Value) -> iolist_to_binary(Value).
 
 %% 热路径：handler / 框架给出的头几乎全是 binary，走无 try 的快路径。
 wireHeader({Name, Value}) when is_binary(Name), is_binary(Value), Name =/= <<>> ->
-   case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
-      true -> {ok, Name, Value};
-      false ->
-         ?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
-         invalid
-   end;
+	case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+		true -> {ok, Name, Value};
+		false ->
+			?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+			invalid
+	end;
 wireHeader({Key0, Value0}) when Key0 =/= <<>>, Key0 =/= '' ->
-   try
-      Name = toBinStr(Key0),
-      Value = toBinStr(Value0),
-      case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
-         true -> {ok, Name, Value};
-         false ->
-            ?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
-            invalid
-      end
-   catch
-      _:_ -> invalid
-   end;
+	try
+		Name = toBinStr(Key0),
+		Value = toBinStr(Value0),
+		case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+			true -> {ok, Name, Value};
+			false ->
+				?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+				invalid
+		end
+	catch
+		_:_ -> invalid
+	end;
 wireHeader(_) ->
-   invalid.
+	invalid.
 
 validH1HeaderName(<<>>) ->
-   false;
+	false;
 validH1HeaderName(Bin) ->
-   validH1HeaderNameChars(Bin).
+	validH1HeaderNameChars(Bin).
 
 %% guard 逐字节判 token 实测比查表快，保持不动。
 validH1HeaderNameChars(<<>>) ->
-   true;
+	true;
 validH1HeaderNameChars(<<C, Rest/binary>>) when
-   (C >= 65 andalso C =< 90) orelse
-   (C >= 97 andalso C =< 122) orelse
-   (C >= 48 andalso C =< 57) orelse
-   C =:= 33 orelse C =:= 35 orelse C =:= 36 orelse C =:= 37 orelse
-   C =:= 38 orelse C =:= 39 orelse C =:= 42 orelse C =:= 43 orelse
-   C =:= 45 orelse C =:= 46 orelse C =:= 94 orelse C =:= 95 orelse
-   C =:= 96 orelse C =:= 124 orelse C =:= 126 ->
-   validH1HeaderNameChars(Rest);
+	(C >= 65 andalso C =< 90) orelse
+		(C >= 97 andalso C =< 122) orelse
+		(C >= 48 andalso C =< 57) orelse
+		C =:= 33 orelse C =:= 35 orelse C =:= 36 orelse C =:= 37 orelse
+		C =:= 38 orelse C =:= 39 orelse C =:= 42 orelse C =:= 43 orelse
+		C =:= 45 orelse C =:= 46 orelse C =:= 94 orelse C =:= 95 orelse
+		C =:= 96 orelse C =:= 124 orelse C =:= 126 ->
+	validH1HeaderNameChars(Rest);
 validH1HeaderNameChars(_) ->
-   false.
+	false.
 
 validH1HeaderValue(Value) ->
-   wsUtil:noCtlChars(Value).
+	wsUtil:noCtlChars(Value).
 
 %% 响应头键统一成 binary，便于后续 keydelete / keyfind。
+%% 绝大多数 handler 已直接返回 binary key；这种常见情况原样复用列表，
+%% 避免每个响应都重新分配一份 header list。
 normalizeH1Headers(Headers) ->
-   [{toBinStr(Key), Value} || {Key, Value} <- Headers].
+	case binaryHeaderNames(Headers) of
+		true -> Headers;
+		false -> [{toBinStr(Key), Value} || {Key, Value} <- Headers]
+	end.
+
+binaryHeaderNames([]) ->
+	true;
+binaryHeaderNames([{Key, _Value} | Rest]) when is_binary(Key) ->
+	binaryHeaderNames(Rest);
+binaryHeaderNames(_) ->
+	false.
+
+%% One-pass preparation for ordinary responses: normalize and validate user
+%% headers, drop framing headers owned by the server, and extract Connection.
+prepareResponseHeaders(Headers) ->
+	prepareResponseHeaders(Headers, false, []).
+
+prepareResponseHeaders([], HasClose, Acc) ->
+	{lists:reverse(Acc), HasClose};
+prepareResponseHeaders([{Key0, Value0} | Rest], HasClose, Acc) ->
+	try
+		Name = toBinStr(Key0),
+		Value = toBinStr(Value0),
+		case validH1HeaderName(Name) andalso validH1HeaderValue(Value) of
+			false ->
+				?wsWarn("ignore invalid HTTP/1 response header name=~p", [Name]),
+				prepareResponseHeaders(Rest, HasClose, Acc);
+			true ->
+				case managedResponseHeader(Name) of
+					content_length ->
+						prepareResponseHeaders(Rest, HasClose, Acc);
+					transfer_encoding ->
+						prepareResponseHeaders(Rest, HasClose, Acc);
+					connection ->
+						prepareResponseHeaders(
+							Rest,
+							HasClose orelse headerValueHasToken(Value, <<"close">>),
+							Acc
+						);
+					normal ->
+						prepareResponseHeaders(Rest, HasClose, [{Name, Value} | Acc])
+				end
+		end
+	catch
+		_:_ ->
+			prepareResponseHeaders(Rest, HasClose, Acc)
+	end;
+prepareResponseHeaders([_ | Rest], HasClose, Acc) ->
+	prepareResponseHeaders(Rest, HasClose, Acc).
+
+managedResponseHeader(Name) when byte_size(Name) =:= 10 ->
+	case wsUtil:headerNameEq(Name, <<"Connection">>) of
+		true -> connection;
+		false -> normal
+	end;
+managedResponseHeader(Name) when byte_size(Name) =:= 14 ->
+	case wsUtil:headerNameEq(Name, <<"Content-Length">>) of
+		true -> content_length;
+		false -> normal
+	end;
+managedResponseHeader(Name) when byte_size(Name) =:= 17 ->
+	case wsUtil:headerNameEq(Name, <<"Transfer-Encoding">>) of
+		true -> transfer_encoding;
+		false -> normal
+	end;
+managedResponseHeader(_Name) ->
+	normal.
 
 %% header 名按 RFC 7230 大小写不敏感。旧实现每次 toLowerStr 分配临时 binary，
 %% 响应热路径上每请求十余次查找，吃掉约 15~20% 吞吐。
 %% 现在：先 lists:keyfind（BIF，规范大小写时直接命中），未命中再零分配 CI 比较。
-deleteHeader(Name, Headers) ->
-   lists:filter(fun
-      ({Key, _}) -> not wsUtil:headerNameEq(Key, Name);
-      (_) -> true
-   end, Headers).
-
 findHeader(Name, Headers) ->
-   case lists:keyfind(Name, 1, Headers) of
-      {_, _} = Found -> Found;
-      false -> findHeaderCi(Name, Headers)
-   end.
+	case lists:keyfind(Name, 1, Headers) of
+		{_, _} = Found -> Found;
+		false -> findHeaderCi(Name, Headers)
+	end.
 
 findHeaderCi(_Name, []) ->
-   false;
+	false;
 findHeaderCi(Name, [{Key, Value} | Rest]) ->
-   case wsUtil:headerNameEq(Key, Name) of
-      true -> {Key, Value};
-      false -> findHeaderCi(Name, Rest)
-   end;
+	case wsUtil:headerNameEq(Key, Name) of
+		true -> {Key, Value};
+		false -> findHeaderCi(Name, Rest)
+	end;
 findHeaderCi(Name, [_ | Rest]) ->
-   findHeaderCi(Name, Rest).
+	findHeaderCi(Name, Rest).
 
 -spec splitArgs(binary()) -> list({binary(), binary() | true}).
 splitArgs(<<>>) -> [];
 splitArgs(Qs) ->
-   Tokens = binary:split(Qs, <<"&">>, [global, trim]),
-   [case binary:split(Token, <<"=">>) of [Token] -> {Token, true}; [Name, Value] ->
-      {Name, Value} end || Token <- Tokens].
+	Tokens = binary:split(Qs, <<"&">>, [global, trim]),
+	[case binary:split(Token, <<"=">>) of [Token] -> {Token, true}; [Name, Value] ->
+		{Name, Value} end || Token <- Tokens].
 
 toBinStr(V) when is_integer(V) -> integer_to_binary(V);
 toBinStr(V) when is_binary(V) -> V;
@@ -1120,39 +1358,59 @@ toBinStr(V) when is_list(V) -> list_to_binary(V);
 toBinStr(V) when is_atom(V) -> atom_to_binary(V).
 
 closeOrKeepAlive(UserHeaders, ReqHeader) ->
-   connectionPolicy(UserHeaders, ReqHeader, {1, 1}).
+	connectionPolicy(UserHeaders, ReqHeader, {1, 1}).
 
 %% HTTP/1.1 下 keep-alive 是默认，不必再解析 Connection: keep-alive。
 connectionPolicy(UserHeaders, ReqHeaders, Version) ->
-   case headerHasToken(<<"Connection">>, UserHeaders, <<"close">>)
-        orelse headerHasToken('Connection', ReqHeaders, <<"close">>) of
-      true ->
-         close;
-      false when Version =:= {1, 0} ->
-         case headerHasToken('Connection', ReqHeaders, <<"keep-alive">>) of
-            true -> keep_alive;
-            false -> close
-         end;
-      false ->
-         keep_alive
-   end.
+	case headerHasToken(<<"Connection">>, UserHeaders, <<"close">>)
+		orelse requestHeaderHasToken('Connection', ReqHeaders, <<"close">>) of
+		true ->
+			close;
+		false when Version =:= {1, 0} ->
+			case requestHeaderHasToken('Connection', ReqHeaders, <<"keep-alive">>) of
+				true -> keep_alive;
+				false -> close
+			end;
+		false ->
+			keep_alive
+	end.
 
-addConnectionHeader(Headers0, Policy, Version) ->
-   Headers = deleteHeader(<<"Connection">>, Headers0),
-   case {Policy, Version} of
-      {close, _} -> [{<<"Connection">>, <<"close">>} | Headers];
-      {keep_alive, {1, 0}} -> [{<<"Connection">>, <<"Keep-Alive">>} | Headers];
-      {keep_alive, _} -> Headers
-   end.
+connectionPolicyPrepared(true, _ReqConn, _Version) ->
+	close;
+connectionPolicyPrepared(false, {true, _ReqKeepAlive}, _Version) ->
+	close;
+connectionPolicyPrepared(false, {false, true}, {1, 0}) ->
+	keep_alive;
+connectionPolicyPrepared(false, {false, false}, {1, 0}) ->
+	close;
+connectionPolicyPrepared(false, _ReqConn, _Version) ->
+	keep_alive.
+
+addConnectionHeaderPrepared(Headers, close, _Version) ->
+	[{<<"Connection">>, <<"close">>} | Headers];
+addConnectionHeaderPrepared(Headers, keep_alive, {1, 0}) ->
+	[{<<"Connection">>, <<"Keep-Alive">>} | Headers];
+addConnectionHeaderPrepared(Headers, keep_alive, _Version) ->
+	Headers.
+
+%% decode_packet(httph_bin, ...) 会把 Connection 这类标准字段规范成 atom。
+%% 请求热路径因此直接 keyfind，不再在缺失时做逐项大小写扫描。
+requestHeaderHasToken(Name, Headers, Wanted) ->
+	case lists:keyfind(Name, 1, Headers) of
+		false -> false;
+		{_, Value} -> headerValueHasToken(Value, Wanted)
+	end.
 
 headerHasToken(Name, Headers, Wanted) ->
-   case findHeader(Name, Headers) of
-      false -> false;
-      {_, Value} ->
-         %% 不整串 toLowerStr：按逗号切开后对每个 token 做零分配 CI 比较。
-         Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
-         lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), Wanted) end, Tokens)
-   end.
+	case findHeader(Name, Headers) of
+		false -> false;
+		{_, Value} -> headerValueHasToken(Value, Wanted)
+	end.
+
+headerValueHasToken(Value, Wanted) ->
+	%% 不整串 toLowerStr：按逗号切开后对每个 token 做零分配 CI 比较。
+	Tokens = binary:split(iolist_to_binary(Value), <<",">>, [global]),
+	lists:any(fun(T) -> wsUtil:headerNameEq(string:trim(T), Wanted) end, Tokens).
 
 %% HTTP STATUS CODES
 status(100) -> <<"100 Continue">>;
@@ -1219,4 +1477,4 @@ status(508) -> <<"508 Loop Detected">>;
 status(510) -> <<"510 Not Extended">>;
 status(511) -> <<"511 Network Authentication Required">>;
 status(I) when is_integer(I), I >= 100, I < 1000 ->
-   <<(integer_to_binary(I))/binary, " Unknown">>.
+	<<(integer_to_binary(I))/binary, " Unknown">>.

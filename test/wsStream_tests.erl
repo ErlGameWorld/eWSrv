@@ -26,6 +26,16 @@ disconnectTest(Transport, Port) ->
          error(stream_disconnect_timeout)
       end.
 
+linked_stream_producer_crash_closes_connection_test() ->
+   withServer(tcp, fun(Port) ->
+      {ok, Socket} = connect(tcp, Port),
+      ok = gen_tcp:send(Socket, request(<<"/producer-crash">>, <<"keep-alive">>)),
+      Head = recvUntil(Socket, <<"\r\n\r\n">>, <<>>, 2000),
+      ?assertNotEqual(nomatch, binary:match(Head, <<"HTTP/1.1 200 OK">>)),
+      %% Producer exits without {chunk, close}; connection must not stay stuck in chunkLoop.
+      ?assertEqual({error, closed}, gen_tcp:recv(Socket, 0, 2000))
+   end).
+
 server_closed_stream_can_keep_connection_alive_test() ->
    withServer(tcp, fun(Port) ->
       {ok, Socket} = connect(tcp, Port),
@@ -36,6 +46,22 @@ server_closed_stream_can_keep_connection_alive_test() ->
       Second = recvUntil(Socket, <<"hello">>, <<>>, 2000),
       ?assertNotEqual(nomatch, binary:match(Second, <<"200 OK">>)),
       ?assertNotEqual(nomatch, binary:match(Second, <<"hello">>)),
+      gen_tcp:close(Socket)
+   end).
+
+pipeline_arriving_during_stream_is_processed_after_stream_test() ->
+   withServer(tcp, fun(Port) ->
+      {ok, Socket} = connect(tcp, Port),
+      ok = gen_tcp:send(Socket, request(<<"/delayed-finite">>, <<"keep-alive">>)),
+      FirstHead = recvUntil(Socket, <<"\r\n\r\n">>, <<>>, 2000),
+      ?assertNotEqual(nomatch,
+         binary:match(wsUtil:toLowerStr(FirstHead), <<"transfer-encoding: chunked">>)),
+      %% Send the next request while the first response is still streaming.
+      ok = gen_tcp:send(Socket, request(<<"/hello">>, <<"close">>)),
+      Tail = recvUntil(Socket, <<"hello">>, <<>>, 2000),
+      All = <<FirstHead/binary, Tail/binary>>,
+      ?assertNotEqual(nomatch, binary:match(All, <<"done">>)),
+      ?assertEqual(2, length(binary:matches(All, <<"HTTP/1.1 200 OK">>))),
       gen_tcp:close(Socket)
    end).
 

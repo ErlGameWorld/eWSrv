@@ -3,7 +3,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("wsCom.hrl").
 
-%% logger primary filter 回调，用于断言 sendResponse 的日志级别（见 peerGoneResponseLogsWarning/0）
+%% logger primary filter 回调用于验证发送失败时是否产生非预期日志。
 -export([logFilter/2]).
 
 %% ============================================================================
@@ -40,6 +40,9 @@ spell_headers_accepts_atom_keys_test() ->
 expect_100_continue_test_() ->
    {timeout, 10, fun expect100Continue/0}.
 
+unsupported_expectation_returns_417_test_() ->
+   {timeout, 10, fun unsupportedExpectation417/0}.
+
 expect100Continue() ->
    withServer(fun(Port) ->
       {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
@@ -57,6 +60,22 @@ expect100Continue() ->
       {ok, Resp} = gen_tcp:recv(Sock, 0, 2000),
       ?assertMatch(<<"HTTP/1.1 200", _/binary>>, Resp),
       ?assert(binary:match(Resp, <<"hello">>) =/= nomatch),
+      gen_tcp:close(Sock)
+   end).
+
+unsupportedExpectation417() ->
+   withServer(fun(Port) ->
+      {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
+         [binary, {packet, raw}, {active, false}], 2000),
+      ok = gen_tcp:send(Sock, [
+         <<"POST /echo HTTP/1.1\r\n">>,
+         <<"Host: 127.0.0.1\r\n">>,
+         <<"Content-Length: 5\r\n">>,
+         <<"Expect: fancy-feature\r\n">>,
+         <<"\r\n">>
+      ]),
+      {ok, Bin} = recvAll(Sock, <<>>, 3000),
+      ?assertMatch(<<"HTTP/1.1 417", _/binary>>, Bin),
       gen_tcp:close(Sock)
    end).
 
@@ -166,7 +185,25 @@ malformedResponseHeaders() ->
       {ok, Bin} = recvAll(Sock, <<>>, 3000),
       ?assertNotEqual(nomatch, binary:match(Bin, <<"X-Good: ok">>)),
       ?assertEqual(nomatch, binary:match(Bin, <<"X-Injected">>)),
+      ?assertEqual(nomatch, binary:match(Bin, <<"X-Ctl">>)),
       {200, _Headers, <<"safe">>, <<>>} = takeResponse(Bin),
+      gen_tcp:close(Sock)
+   end).
+
+informational_handler_status_becomes_500_test_() ->
+   {timeout, 10, fun informationalHandlerStatus/0}.
+
+informationalHandlerStatus() ->
+   withServer(fun(Port) ->
+      {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
+         [binary, {packet, raw}, {active, false}], 2000),
+      ok = gen_tcp:send(Sock, [
+         <<"GET /informational-final HTTP/1.1\r\n">>,
+         <<"Host: 127.0.0.1\r\nConnection: close\r\n\r\n">>
+      ]),
+      {ok, Bin} = recvAll(Sock, <<>>, 3000),
+      {500, _Headers, <<"Internal server error">>, <<>>} = takeResponse(Bin),
+      ?assertEqual(nomatch, binary:match(Bin, <<"103 Early Hints">>)),
       gen_tcp:close(Sock)
    end).
 
@@ -193,6 +230,10 @@ handler_init_runs_without_custom_supervisor_test_() ->
    {timeout, 10, fun handlerInitWithoutSupervisor/0}.
 
 handlerInitWithoutSupervisor() ->
+   %% Exercise the first connection while the handler is still unloaded.
+   _ = code:purge(wsHttpFixTestHandler),
+   _ = code:delete(wsHttpFixTestHandler),
+   ?assertEqual(false, code:is_loaded(wsHttpFixTestHandler)),
    withServer(fun(Port) ->
       {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, Port,
          [binary, {packet, raw}, {active, false}], 2000),
@@ -240,18 +281,16 @@ lowercaseResponseHeaders() ->
 %% ============================================================================
 
 %% ============================================================================
-%% Unit: sendResponse 对「对端已断开」只记 warning
+%% Unit: sendResponse 对「对端已断开」不记录日志
 %% ============================================================================
 %% 关闭后的 socket 交给 ntCom:syncSend，内部 port_command/3 会 badarg 并被 eNet
 %% 统一兜成 {error, einval}（实测 LISTEN / ACCEPTED 两种死 port 都是这个值）；
 %% ssl 侧对应 closed / econnreset / epipe。这类「对端先走了」在压测(wrk)收尾、
-%% 浏览器提前导航时必然发生，必须落 warning——否则真实服务上会被 ERROR REPORT 刷屏，
-%% 把真正的写失败淹掉。
-%% 注意：这条用例自己必然会打出一条 WARNING REPORT（那正是被测行为），判绿看断言。
-peer_gone_response_logs_warning_test_() ->
-   {timeout, 10, fun peerGoneResponseLogsWarning/0}.
+%% 浏览器提前导航时可能发生，按正常对端断开处理即可，不往日志刷大量预期错误。
+peer_gone_response_does_not_log_test_() ->
+   {timeout, 10, fun peerGoneResponseDoesNotLog/0}.
 
-peerGoneResponseLogsWarning() ->
+peerGoneResponseDoesNotLog() ->
    installLogCapture(),
    try
       {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
@@ -261,10 +300,7 @@ peerGoneResponseLogsWarning() ->
       ok = gen_tcp:close(Server),
       _ = drainLogs(),
       ?assertEqual({error, einval}, wsHttp:sendResponse(Server, 'GET', 200, [], <<"bye">>)),
-      %% 只应有一条日志，且是 warning：没有 ERROR REPORT
-      [{Level, Text}] = drainLogs(),
-      ?assertEqual(warning, Level),
-      ?assertNotEqual(nomatch, binary:match(Text, <<"peer gone">>)),
+      ?assertEqual([], drainLogs()),
       ok = gen_tcp:close(Client),
       ok = gen_tcp:close(Listen)
    after

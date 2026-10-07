@@ -26,6 +26,16 @@ hpack_roundtrip_test() ->
    {ok, Decoded, _Rx} = wsHpack:decode(iolist_to_binary(Encoded), wsHpack:new()),
    ?assertEqual(Headers, Decoded).
 
+hpack_lowercase_fast_path_roundtrip_test() ->
+   Headers = [
+      {<<":status">>, <<"200">>},
+      {<<"content-type">>, <<"text/plain">>},
+      {<<"cache-control">>, <<"no-store">>}
+   ],
+   {Encoded, _Tx} = wsHpack:encodeLower(Headers, wsHpack:new()),
+   {ok, Decoded, _Rx} = wsHpack:decode(iolist_to_binary(Encoded), wsHpack:new()),
+   ?assertEqual(Headers, Decoded).
+
 huffman_roundtrip_test() ->
    Bin = <<"www.example.com: gzip, deflate; hello HTTP/2">>,
    Encoded = wsHuffman:encode(Bin),
@@ -40,13 +50,19 @@ frame_split_roundtrip_test() ->
    {frame, data, LastFlags, 1, _} = lists:last(Parsed),
    ?assert(LastFlags band ?END_STREAM =/= 0).
 
+frame_accepts_nested_iodata_without_semantic_change_test() ->
+   Wire = wsHttp2Frame:frame(data, 3, [<<"ab">>, [<<"cd">>, "ef"]], 0),
+   {_Parser, [{frame, data, 0, 3, Payload}]} =
+      wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Wire)),
+   ?assertEqual(<<"abcdef">>, Payload).
+
 http2_prior_knowledge_integration_test_() ->
    {timeout, 20, fun priorKnowledge/0}.
 
 priorKnowledge() ->
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {ok, _} = eWSrv:openSrv(Name, 0, [{http2, true}, {wsMod, wsTPHer}, {chunkedSupp, true}]),
       ListenerName = ntCom:lsName(tcp, Name),
@@ -78,7 +94,7 @@ priorKnowledge() ->
       ?assertEqual(<<"Hello, World!">>, RespBody),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_tls_alpn_integration_test_() ->
@@ -87,7 +103,7 @@ http2_tls_alpn_integration_test_() ->
 tlsAlpn() ->
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_tls_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    Priv = code:priv_dir(eWSrv),
    Cert = filename:join(Priv, "server_cert.pem"),
    Key = filename:join(Priv, "server_key.pem"),
@@ -125,7 +141,7 @@ tlsAlpn() ->
       ?assertEqual(<<"Hello, World!">>, RespBody),
       ssl:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 recvUntilSsl(Pred, Sock, Parser0, Acc0, Timeout) ->
@@ -143,7 +159,7 @@ http2_header_compatibility_test_() ->
 
 headerCompatibility() ->
    Name = ws_http2_header_compat_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
       Origin = <<"https://example.com">>,
@@ -159,7 +175,7 @@ headerCompatibility() ->
       ?assertEqual(Origin, proplists:get_value(<<"access-control-allow-origin">>, RespHeaders)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_continuation_integration_test_() ->
@@ -167,7 +183,7 @@ http2_continuation_integration_test_() ->
 
 continuationRequest() ->
    Name = ws_http2_cont_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Large = base64:encode(crypto:strong_rand_bytes(18000)),
@@ -190,7 +206,7 @@ continuationRequest() ->
       ?assertEqual(<<"one">>, Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_authority_is_exposed_as_host_test_() ->
@@ -198,7 +214,7 @@ http2_authority_is_exposed_as_host_test_() ->
 
 authorityAsHost() ->
    Name = ws_http2_host_compat_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
       Headers = [
@@ -214,7 +230,7 @@ authorityAsHost() ->
       ?assertNotEqual(nomatch, binary:match(Body, <<"Host: example.test:8080">>)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_invalid_method_is_stream_error_test_() ->
@@ -222,7 +238,7 @@ http2_invalid_method_is_stream_error_test_() ->
 
 invalidMethod() ->
    Name = ws_http2_bad_method_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Headers = [
@@ -255,7 +271,7 @@ invalidMethod() ->
       ?assertEqual(<<"two">>, maps:get(3, BMap)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_closed_stream_data_keeps_connection_alive_test_() ->
@@ -263,7 +279,7 @@ http2_closed_stream_data_keeps_connection_alive_test_() ->
 
 closedStreamData() ->
    Name = ws_http2_closed_data_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H1 = [
@@ -300,7 +316,122 @@ closedStreamData() ->
       ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(3, HMap))),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+http2_informational_final_is_rejected_test_() ->
+   {timeout, 20, fun informationalFinalRejected/0}.
+
+informationalFinalRejected() ->
+   Name = ws_http2_info_final_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/informational-final">>}
+      ],
+      {B, _Tx} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"500">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<"Internal server error">>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+http2_large_response_yields_to_other_streams_test_() ->
+   {timeout, 20, fun largeResponseYields/0}.
+
+largeResponseYields() ->
+   Name = ws_http2_fair_send_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      %% 给足未来 stream 的发送窗口：idle stream 上不能提前发 WINDOW_UPDATE，
+      %% 因此先用客户端 SETTINGS 调大 INITIAL_WINDOW_SIZE，等服务端 ACK 后
+      %% 再放大 connection window。这样测试到的是服务端调度公平性，而不是
+      %% flow-control 自然把大流卡住。
+      Credit = 4 * 1024 * 1024,
+      ok = gen_tcp:send(Sock,
+         wsHttp2Frame:settingsFrame([{initial_window_size, Credit}])),
+      IsSettingsAck = fun(Fs) -> lists:any(fun
+         ({frame, settings, Flags, 0, <<>>}) -> Flags band 1 =/= 0;
+         (_) -> false
+      end, Fs) end,
+      {Parser2, _AckFrames} = recvUntil(IsSettingsAck, Sock, Parser1, [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:windowUpdateFrame(0, Credit)),
+      H1 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/1m">>}
+      ],
+      H3 = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/one">>}
+      ],
+      {B1, Tx1} = wsHpack:encode(H1, wsHpack:new()),
+      {B3, _Tx2} = wsHpack:encode(H3, Tx1),
+      ok = gen_tcp:send(Sock, [
+         wsHttp2Frame:headersFrames(B1, 1, 16384, true),
+         wsHttp2Frame:headersFrames(B3, 3, 16384, true)
+      ]),
+      Done = fun(Fs) -> streamEnded(1, Fs) andalso streamEnded(3, Fs) end,
+      {_Parser3, Frames} = recvUntil(Done, Sock, Parser2, [], 5000),
+      PosSmall = framePosition(fun
+         ({frame, data, _Flags, 3, <<"one">>}) -> true;
+         (_) -> false
+      end, Frames),
+      PosBigEnd = framePosition(fun
+         ({frame, data, Flags, 1, _}) -> Flags band ?END_STREAM =/= 0;
+         ({frame, headers, Flags, 1, _}) -> Flags band ?END_STREAM =/= 0;
+         (_) -> false
+      end, Frames),
+      ?assert(PosSmall > 0),
+      ?assert(PosBigEnd > 0),
+      ?assert(PosSmall < PosBigEnd),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+framePosition(Pred, Frames) ->
+   framePosition(Pred, Frames, 1).
+
+framePosition(_Pred, [], _Pos) ->
+   0;
+framePosition(Pred, [Frame | Rest], Pos) ->
+   case Pred(Frame) of
+      true -> Pos;
+      false -> framePosition(Pred, Rest, Pos + 1)
+   end.
+
+http2_streaming_response_respects_header_limit_test_() ->
+   {timeout, 20, fun streamingResponseHeaderLimit/0}.
+
+streamingResponseHeaderLimit() ->
+   Name = ws_http2_stream_header_limit_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>},
+         {<<":path">>, <<"/stream-oversized-header">>}
+      ],
+      {B, _Tx} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(B, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _Flags, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, internal_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_205_has_no_content_test_() ->
@@ -308,7 +439,7 @@ http2_205_has_no_content_test_() ->
 
 noContent205() ->
    Name = ws_http2_205_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H = [
@@ -324,7 +455,7 @@ noContent205() ->
       ?assertEqual(<<>>, Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_post_data_integration_test_() ->
@@ -332,7 +463,7 @@ http2_post_data_integration_test_() ->
 
 postData() ->
    Name = ws_http2_post_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Headers = [
@@ -354,7 +485,7 @@ postData() ->
       ?assertEqual(<<"hello world">>, Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_multiplex_integration_test_() ->
@@ -362,7 +493,7 @@ http2_multiplex_integration_test_() ->
 
 multiplex() ->
    Name = ws_http2_multi_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Base1 = [
@@ -388,7 +519,7 @@ multiplex() ->
       ?assertEqual(<<"two">>, maps:get(3, BMap)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_request_body_timeout_test_() ->
@@ -397,7 +528,7 @@ http2_request_body_timeout_test_() ->
 requestBodyTimeout() ->
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_req_timeout_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {ok, _} = eWSrv:openSrv(Name, 0, [
          {http2, true}, {wsMod, wsHttp2TestHandler},
@@ -425,8 +556,65 @@ requestBodyTimeout() ->
       ?assert(Pred(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
+
+%% 扫描定时器在所有流关闭后应自行停止，下一个流创建时能重新起来。
+%% 回归点：rescheduleSweep 在无流时若没把 stream_sweep_timer 置回 undefined，
+%% 新流虽然记了 last_activity，却永远没有扫描来判它超时 —— 静默失效。
+http2_sweep_timer_restarts_after_idle_test_() ->
+   {timeout, 30, fun sweepTimerRestartsAfterIdle/0}.
+
+sweepTimerRestartsAfterIdle() ->
+   {ok, _} = application:ensure_all_started(eWSrv),
+   Name = ws_http2_sweep_restart_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   RequestTimeout = 300,
+   try
+      {ok, _} = eWSrv:openSrv(Name, 0, [
+         {http2, true}, {wsMod, wsHttp2TestHandler},
+         {requestTimeout, RequestTimeout}, {keepAliveTimeout, 30000}
+      ]),
+      ListenerName = ntCom:lsName(tcp, Name),
+      Port = ntTcpListener:getListenPort(ListenerName),
+      {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port, [binary, {packet, raw}, {active, false}], 5000),
+      ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
+      {Parser1, _} = recvUntil(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+
+      %% 流 1：建好后完全不活动 -> 超时被 RST。此刻流表变空，扫描定时器随之停止。
+      {Parser2, Tx1, Frames1} = idleStreamTimesOut(Sock, Parser1, 1, wsHpack:new(), RequestTimeout),
+      ?assert(hasRstStream(1, Frames1)),
+
+      %% 空转两个周期，确保「无流」期间扫描确实停过。
+      timer:sleep(RequestTimeout * 2),
+
+      %% 流 3：扫描定时器必须重新起来，否则这个流永远等不到超时判定的 RST。
+      {_Parser3, _Tx3, Frames3} = idleStreamTimesOut(Sock, Parser2, 3, Tx1, RequestTimeout),
+      ?assert(hasRstStream(3, Frames3)),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+%% 发一个「不带 END_STREAM、也不发 DATA」的请求，等它的 RST_STREAM。
+idleStreamTimesOut(Sock, Parser0, StreamId, Hpack0, RequestTimeout) ->
+   Headers = [
+      {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+      {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+      {<<"content-length">>, <<"10">>}
+   ],
+   {Block, Hpack1} = wsHpack:encode(Headers, Hpack0),
+   ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, StreamId, 16384, false)),
+   Pred = fun(Fs) -> hasRstStream(StreamId, Fs) end,
+   {Parser1, Frames} = recvUntil(Pred, Sock, Parser0, [], RequestTimeout + 3000),
+   {Parser1, Hpack1, Frames}.
+
+hasRstStream(StreamId, Frames) ->
+   lists:any(fun
+      ({frame, rst_stream, _Flags, Sid, _Payload}) -> Sid =:= StreamId;
+      (_) -> false
+   end, Frames).
 
 http2_idle_goaway_test_() ->
    {timeout, 20, fun idleGoaway/0}.
@@ -434,7 +622,7 @@ http2_idle_goaway_test_() ->
 idleGoaway() ->
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_idle_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {ok, _} = eWSrv:openSrv(Name, 0, [{http2, true}, {wsMod, wsHttp2TestHandler}, {keepAliveTimeout, 100}]),
       ListenerName = ntCom:lsName(tcp, Name),
@@ -451,7 +639,7 @@ idleGoaway() ->
       ?assert(Pred(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_compression_integration_test_() ->
@@ -459,7 +647,7 @@ http2_compression_integration_test_() ->
 
 compression() ->
    Name = ws_http2_compress_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsTPHer),
       Headers = [
@@ -477,7 +665,7 @@ compression() ->
       ?assertEqual(binary:copy(<<"Hello World!">>, 86), Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_slow_stream_does_not_block_fast_stream_test_() ->
@@ -485,7 +673,7 @@ http2_slow_stream_does_not_block_fast_stream_test_() ->
 
 slowDoesNotBlockFast() ->
    Name = ws_http2_parallel_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       SlowHeaders = [
@@ -515,7 +703,69 @@ slowDoesNotBlockFast() ->
       ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, maps:get(3, HMap))),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+%% 窗口受限的慢速大响应每轮都仍有进展，不能被 requestTimeout 判成超时 RST。
+%% 回归点：flushPendingLoop 在「本批发完但 pending_send 仍有数据」分支漏刷新
+%% stream timer，使 body 大于 flow-control 窗口的响应在持续推进时被 cancel。
+http2_window_limited_large_body_keeps_stream_timer_alive_test_() ->
+   {timeout, 20, fun windowLimitedLargeBodyKeepsTimerAlive/0}.
+
+windowLimitedLargeBodyKeepsTimerAlive() ->
+   Name = ws_http2_slow_body_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   %% requestTimeout 远小于下面把全部 body 推完所需的墙钟时间。
+   RequestTimeout = 500,
+   try
+      {Sock, Parser1, _ServerFrames} = openPriorKnowledgeOpts(
+         Name, wsHttp2TestHandler, [{requestTimeout, RequestTimeout}]),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+      Headers = [
+         {<<":method">>, <<"GET">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/large">>}
+      ],
+      {Block, _Tx} = wsHpack:encode(Headers, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      %% 100KB body 会立刻填满默认 65535 的 stream/connection window，剩余部分
+      %% 只能靠后续 WINDOW_UPDATE 逐轮放行 —— 正是漏刷新 timer 的路径。
+      {Parser2, Frames1} = recvUntil(
+         fun(Fs) -> streamDataSize(1, Fs) >= 65535 end, Sock, Parser1, [], 3000),
+      ?assertEqual(65535, streamDataSize(1, Frames1)),
+      ?assertNot(streamEnded(1, Frames1)),
+      %% 65535 之后还剩 34465 字节：每轮放行 5KB 且间隔 300ms，推完约需 2s，
+      %% 远超 RequestTimeout，但每一轮都确实有数据发出（不是 stalled）。
+      {_Parser3, Frames2} = trickleGrants(Sock, Parser2, Frames1, 10, 5000),
+      ?assertEqual(100000, streamDataSize(1, Frames2)),
+      ?assert(streamEnded(1, Frames2)),
+      ?assertNot(lists:any(fun
+         ({frame, rst_stream, _Flags, 1, _Payload}) -> true;
+         (_) -> false
+      end, Frames2)),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+%% 逐步放行 stream+connection window，模拟「窗口受限但持续有进展」的慢客户端。
+%% 每轮间隔 300ms，让整个响应耗时明显超过 requestTimeout，stream 一旦结束立即收手。
+trickleGrants(_Sock, Parser, Frames, 0, _Grant) ->
+   {Parser, Frames};
+trickleGrants(Sock, Parser0, Frames0, Rounds, Grant) ->
+   case streamEnded(1, Frames0) of
+      true ->
+         {Parser0, Frames0};
+      false ->
+         ok = gen_tcp:send(Sock, [
+            wsHttp2Frame:windowUpdateFrame(0, Grant),
+            wsHttp2Frame:windowUpdateFrame(1, Grant)
+         ]),
+         Expected = streamDataSize(1, Frames0) + Grant,
+         {Parser1, Frames1} = recvUntil(
+            fun(Fs) -> streamEnded(1, Fs) orelse streamDataSize(1, Fs) >= Expected end,
+            Sock, Parser0, Frames0, 3000),
+         timer:sleep(300),
+         trickleGrants(Sock, Parser1, Frames1, Rounds - 1, Grant)
    end.
 
 http2_send_flow_control_integration_test_() ->
@@ -523,7 +773,7 @@ http2_send_flow_control_integration_test_() ->
 
 sendFlowControl() ->
    Name = ws_http2_flow_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Headers = [
@@ -546,19 +796,69 @@ sendFlowControl() ->
       ?assertEqual(binary:copy(<<"x">>, 100000), Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+http2_receive_window_tuning_advertises_stream_and_connection_windows_test_() ->
+   {timeout, 20, fun receiveWindowTuning/0}.
+
+receiveWindowTuning() ->
+   Name = ws_http2_receive_window_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   ReceiveWindow = 1024 * 1024,
+   MaxConcurrent = 37,
+   try
+      {Sock, Parser1, ServerFrames} = openPriorKnowledgeOpts(Name, wsHttp2TestHandler, [
+         {http2ReceiveWindow, ReceiveWindow},
+         {http2MaxConcurrentStreams, MaxConcurrent}
+      ]),
+      SettingsPayload = hd([
+         Payload || {frame, settings, Flags, 0, Payload} <- ServerFrames,
+                    Flags band 1 =:= 0
+      ]),
+      {ok, Settings} = wsHttp2Frame:settingsDecode(SettingsPayload),
+      ?assertEqual(ReceiveWindow, proplists:get_value(initial_window_size, Settings)),
+      ?assertEqual(MaxConcurrent, proplists:get_value(max_concurrent_streams, Settings)),
+      Delta = ReceiveWindow - 65535,
+      ?assert(lists:any(fun
+         ({frame, window_update, _Flags, 0, Payload}) ->
+            wsHttp2Frame:windowUpdateIncrement(Payload) =:= {ok, Delta};
+         (_) -> false
+      end, ServerFrames)),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+      _ = Parser1,
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 openPriorKnowledge(Name, Handler) ->
+   {Sock, Parser, _ServerFrames} = openPriorKnowledgeOpts(Name, Handler, []),
+   ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
+   {Sock, Parser}.
+
+openPriorKnowledgeOpts(Name, Handler, ExtraOpts) ->
    {ok, _} = application:ensure_all_started(eWSrv),
-   {ok, _} = eWSrv:openSrv(Name, 0, [{http2, true}, {wsMod, Handler}]),
+   {ok, _} = eWSrv:openSrv(Name, 0, [
+      {http2, true}, {wsMod, Handler} | ExtraOpts
+   ]),
    ListenerName = ntCom:lsName(tcp, Name),
    Port = ntTcpListener:getListenPort(ListenerName),
-   {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port, [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
+   {ok, Sock} = gen_tcp:connect({127,0,0,1}, Port,
+      [binary, {packet, raw}, {active, false}, {nodelay, true}], 5000),
    ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
-   {Parser1, _ServerFrames} = recvUntil(fun hasSettings/1, Sock, wsHttp2Frame:new(), [], 5000),
-   ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
-   {Sock, Parser1}.
+   NeedInitial = fun(Frames) ->
+      hasSettings(Frames) andalso
+         case proplists:get_value(http2ReceiveWindow, ExtraOpts, 65535) of
+            65535 -> true;
+            _ -> lists:any(fun
+               ({frame, window_update, _Flags, 0, _Payload}) -> true;
+               (_) -> false
+            end, Frames)
+         end
+   end,
+   {Parser1, ServerFrames} = recvUntil(NeedInitial, Sock, wsHttp2Frame:new(), [], 5000),
+   {Sock, Parser1, ServerFrames}.
 
 streamEnded(StreamId, Frames) ->
    lists:any(fun
@@ -726,6 +1026,17 @@ data_frames_end_stream_helper_test() ->
    {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
    ?assertMatch([{frame, data, 0, 3, _}, {frame, data, 0, 3, _}, {frame, data, ?END_STREAM, 3, _}], Frames).
 
+data_frames_open_batch_helper_test() ->
+   Body = binary:copy(<<"x">>, 40),
+   Io = wsHttp2Frame:dataFrames(Body, 3, 16, false),
+   {_P, Frames} = wsHttp2Frame:feed(wsHttp2Frame:new(), iolist_to_binary(Io)),
+   ?assertMatch([
+      {frame, data, 0, 3, _},
+      {frame, data, 0, 3, _},
+      {frame, data, 0, 3, _}
+   ], Frames).
+
+
 hpack_static_decode_regression_test() ->
    {ok, [{<<":method">>, <<"GET">>}], _} =
       wsHpack:decode(<<16#82>>, wsHpack:new()).
@@ -744,6 +1055,24 @@ hpack_dynamic_table_reuse_test() ->
    {Enc2, _E2} = wsHpack:encode(H, E1),
    {ok, H, _D2} = wsHpack:decode(iolist_to_binary(Enc2), D1),
    ?assert(iolist_size(Enc2) < iolist_size(Enc1)).
+
+hpack_dynamic_table_eviction_roundtrip_test() ->
+   %% Tiny table forces eviction on almost every new literal. The test checks
+   %% encoder/decoder context stays synchronized across repeated evictions.
+   E0 = wsHpack:setMax(128, wsHpack:new()),
+   D0 = wsHpack:new(128),
+   H1 = [{<<"x-a">>, binary:copy(<<"a">>, 48)}],
+   H2 = [{<<"x-b">>, binary:copy(<<"b">>, 48)}],
+   H3 = [{<<"x-c">>, binary:copy(<<"c">>, 48)}],
+   {B1, E1} = wsHpack:encode(H1, E0),
+   {ok, H1, D1} = wsHpack:decode(iolist_to_binary(B1), D0),
+   {B2, E2} = wsHpack:encode(H2, E1),
+   {ok, H2, D2} = wsHpack:decode(iolist_to_binary(B2), D1),
+   {B3, E3} = wsHpack:encode(H3, E2),
+   {ok, H3, D3} = wsHpack:decode(iolist_to_binary(B3), D2),
+   {B4, _E4} = wsHpack:encode(H2, E3),
+   {ok, H2, _D4} = wsHpack:decode(iolist_to_binary(B4), D3).
+
 
 hpack_bad_index_regression_test() ->
    ?assertEqual({error, badIndex}, wsHpack:decode(<<16#80>>, wsHpack:new())),
@@ -782,7 +1111,7 @@ http2_respects_peer_header_list_limit_test_() ->
 respectsPeerHeaderLimit() ->
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_peer_header_limit_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {ok, _} = eWSrv:openSrv(Name, 0, [{http2, true}, {wsMod, wsHttp2TestHandler}]),
       ListenerName = ntCom:lsName(tcp, Name),
@@ -813,7 +1142,7 @@ respectsPeerHeaderLimit() ->
       ?assert(IsRst(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 hpack_size_update_emits_minimum_before_restore_test() ->
@@ -829,7 +1158,7 @@ http2_empty_continuation_is_limited_test_() ->
 
 emptyContinuationLimited() ->
    Name = ws_http2_cont_limit_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Headers = [
@@ -851,7 +1180,7 @@ emptyContinuationLimited() ->
       ?assert(IsGoaway(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_headers_on_closed_stream_test_() ->
@@ -859,7 +1188,7 @@ http2_headers_on_closed_stream_test_() ->
 
 headersOnClosedStream() ->
    Name = ws_http2_closed_headers_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H = [
@@ -889,7 +1218,7 @@ headersOnClosedStream() ->
       ?assertEqual(<<"two">>, maps:get(3, BMap)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_rejects_mismatched_scheme_test_() ->
@@ -897,7 +1226,7 @@ http2_rejects_mismatched_scheme_test_() ->
 
 rejectsMismatchedScheme() ->
    Name = ws_http2_scheme_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H = [
@@ -915,7 +1244,7 @@ rejectsMismatchedScheme() ->
       ?assert(IsRst(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_same_buffer_respects_recv_window_test_() ->
@@ -952,7 +1281,7 @@ http2_rejects_invalid_field_syntax_test_() ->
 
 rejectsInvalidFieldSyntax() ->
    Name = ws_http2_bad_field_syntax_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Base = [
@@ -980,7 +1309,58 @@ rejectsInvalidFieldSyntax() ->
       ?assert(IsRst3(Frames2)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+http2_accepts_identical_duplicate_content_length_test_() ->
+   {timeout, 20, fun acceptsIdenticalDuplicateContentLength/0}.
+
+acceptsIdenticalDuplicateContentLength() ->
+   Name = ws_http2_dup_cl_ok_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"0">>}, {<<"content-length">>, <<"0">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      {_Parser2, Frames} = recvUntil(fun responseEnded/1, Sock, Parser1, [], 5000),
+      {RespHeaders, Body} = decodeResponse(Frames),
+      ?assertEqual(<<"200">>, proplists:get_value(<<":status">>, RespHeaders)),
+      ?assertEqual(<<>>, Body),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
+   end.
+
+http2_rejects_conflicting_content_length_test_() ->
+   {timeout, 20, fun rejectsConflictingContentLength/0}.
+
+rejectsConflictingContentLength() ->
+   Name = ws_http2_dup_cl_bad_eunit,
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
+   try
+      {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
+      H = [
+         {<<":method">>, <<"POST">>}, {<<":scheme">>, <<"http">>},
+         {<<":authority">>, <<"127.0.0.1">>}, {<<":path">>, <<"/echo">>},
+         {<<"content-length">>, <<"0">>}, {<<"content-length">>, <<"1">>}
+      ],
+      {Block, _} = wsHpack:encode(H, wsHpack:new()),
+      ok = gen_tcp:send(Sock, wsHttp2Frame:headersFrames(Block, 1, 16384, true)),
+      IsRst = fun(Fs) -> lists:any(fun
+         ({frame, rst_stream, _, 1, Payload}) ->
+            wsHttp2Frame:rstStreamCode(Payload) =:= {ok, protocol_error};
+         (_) -> false
+      end, Fs) end,
+      {_Parser2, Frames} = recvUntil(IsRst, Sock, Parser1, [], 5000),
+      ?assert(IsRst(Frames)),
+      gen_tcp:close(Sock)
+   after
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_rejects_signed_content_length_test_() ->
@@ -988,7 +1368,7 @@ http2_rejects_signed_content_length_test_() ->
 
 rejectsSignedContentLength() ->
    Name = ws_http2_signed_cl_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H = [
@@ -1007,7 +1387,7 @@ rejectsSignedContentLength() ->
       ?assert(IsRst(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_goaway_no_error_drains_open_stream_test_() ->
@@ -1015,7 +1395,7 @@ http2_goaway_no_error_drains_open_stream_test_() ->
 
 goawayDrainsOpenStream() ->
    Name = ws_http2_goaway_drain_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       H = [
@@ -1035,7 +1415,7 @@ goawayDrainsOpenStream() ->
       ?assertEqual(<<"slow">>, Body),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 http2_ignores_unknown_flag_bits_test_() ->
@@ -1043,7 +1423,7 @@ http2_ignores_unknown_flag_bits_test_() ->
 
 ignoresUnknownFlagBits() ->
    Name = ws_http2_unknown_flags_eunit,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {Sock, Parser1} = openPriorKnowledge(Name, wsHttp2TestHandler),
       Payload = <<"flagtest">>,
@@ -1057,7 +1437,7 @@ ignoresUnknownFlagBits() ->
       ?assert(IsPong(Frames)),
       gen_tcp:close(Sock)
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 goaway_reserved_bit_is_ignored_test() ->

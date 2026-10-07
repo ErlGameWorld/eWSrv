@@ -4,6 +4,7 @@
 
 -define(PREFACE, <<"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n">>).
 -define(END_STREAM, 16#01).
+-define(BENCH_RECV_WINDOW, 64 * 1024 * 1024).
 
 %% @doc 本机 HTTP/2 prior-knowledge benchmark。
 %% 在同一条 TCP connection 上并发多个 stream，尽量隔离连接建立与公网开销。
@@ -32,17 +33,20 @@ run(Opts) when is_map(Opts) ->
    Path = maps:get(path, Opts, <<"/one">>),
    MaxBody = maps:get(max_body, Opts, 8 * 1024 * 1024),
    Quiet = maps:get(quiet, Opts, false),
+   %% 可选：透传额外 openSrv 选项（例如 {tcpOpts,[{buffer,65536}]}）做同机 A/B。
+   WsOpts = maps:get(ws_opts, Opts, []),
    true = is_integer(Requests) andalso Requests > 0,
 
    {ok, _} = application:ensure_all_started(eWSrv),
    Name = ws_http2_bench,
-   _ = catch eWSrv:closeSrv(Name),
+   _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end,
    try
       {ok, _} = eWSrv:openSrv(Name, 0, [
          {http2, true},
          {wsMod, wsHttp2TestHandler},
          {maxSize, MaxBody},
          {keepAliveTimeout, 300000}
+         | WsOpts
       ]),
       ListenerName = ntCom:lsName(tcp, Name),
       Port = ntTcpListener:getListenPort(ListenerName),
@@ -79,11 +83,18 @@ run(Opts) when is_map(Opts) ->
       Quiet orelse printResult(Result),
       Result
    after
-      _ = catch eWSrv:closeSrv(Name)
+      _ = try eWSrv:closeSrv(Name) catch _:_ -> ok end
    end.
 
 handshake(Sock) ->
-   ok = gen_tcp:send(Sock, [?PREFACE, wsHttp2Frame:settingsFrame([])]),
+   %% A long benchmark can exhaust the default 65535-byte receive window
+   %% even when every response body is small. Grant enough client-side credit
+   %% up front so later batches do not stall waiting for WINDOW_UPDATE.
+   ok = gen_tcp:send(Sock, [
+      ?PREFACE,
+      wsHttp2Frame:settingsFrame([{initial_window_size, ?BENCH_RECV_WINDOW}]),
+      wsHttp2Frame:windowUpdateFrame(0, ?BENCH_RECV_WINDOW - 65535)
+   ]),
    {Parser, Frames} = recvUntilSettings(Sock, wsHttp2Frame:new(), [], 5000),
    ok = gen_tcp:send(Sock, wsHttp2Frame:ackFrame()),
    {Parser, Frames}.

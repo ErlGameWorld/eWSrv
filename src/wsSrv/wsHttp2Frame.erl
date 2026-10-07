@@ -20,34 +20,35 @@
 -module(wsHttp2Frame).
 
 -export([
-   new/0
-   , feed/2
-   , setMaxFrame/2
-   , frame/3
-   , frame/4
-   , settingsFrame/1
-   , settingsDecode/1
-   , ackFrame/0
-   , pingFrame/1
-   , pongFrame/1
-   , goawayFrame/2
-   , windowUpdateFrame/2
-   , rstStreamFrame/2
-   , headersFrames/3
-   , headersFrames/4
-   , dataFrames/3
-   , splitPayload/2
-   , goawayFields/1
-   , pingData/1
-   , windowUpdateIncrement/1
-   , rstStreamCode/1
-   , priorityFields/1
+	new/0
+	, feed/2
+	, setMaxFrame/2
+	, frame/3
+	, frame/4
+	, settingsFrame/1
+	, settingsDecode/1
+	, ackFrame/0
+	, pingFrame/1
+	, pongFrame/1
+	, goawayFrame/2
+	, windowUpdateFrame/2
+	, rstStreamFrame/2
+	, headersFrames/3
+	, headersFrames/4
+	, dataFrames/3
+	, dataFrames/4
+	, splitPayload/2
+	, goawayFields/1
+	, pingData/1
+	, windowUpdateIncrement/1
+	, rstStreamCode/1
+	, priorityFields/1
 ]).
 
 -export_type([
-   parser/0
-   , frame/0
-   , frame_type/0
+	parser/0
+	, frame/0
+	, frame_type/0
 ]).
 
 %%====================================================================
@@ -106,22 +107,22 @@
 %% @doc 构造单个无 flag 的 frame，`frame(Type, StreamId, Payload)' 的简写。
 %% @param Type frame 类型原子（或 0..255 的自定义类型号）
 %% @param StreamId stream 标识；连接级 frame（SETTINGS/PING/GOAWAY）用 0
-%% @param Payload frame 负载，iolist 会先被扁平化成 binary
+%% @param Payload frame 负载，可直接使用 iodata；发送前不会强制整块扁平化
 %% @returns iolist，可直接投递给 socket
 -spec frame(frame_type(), non_neg_integer(), iodata()) -> iodata().
 frame(Type, StreamId, Payload) ->
-   frame(Type, StreamId, Payload, 0).
+	frame(Type, StreamId, Payload, 0).
 
 %% @doc 构造带 flag 的 frame。
 %% @param Flags 各 flag 宏的按位或
 -spec frame(frame_type(), non_neg_integer(), iodata(), non_neg_integer()) -> iodata().
 frame(Type, StreamId, Payload, Flags) ->
-   Body = iolist_to_binary(Payload),
-   Size = byte_size(Body),
-   %% 9 字节 frame 头：24 位长度 + 8 位类型 + 8 位 flag + 1 位保留位
-   %% （必须为 0）+ 31 位 stream id。保留位占最高位，所以 stream id
-   %% 只取低 31 位，与 RFC 9113 4.1 的位布局一一对应。
-   [<<Size:24, (typeNum(Type)):8, Flags:8, 0:1, StreamId:31>>, Body].
+	%% Socket API 原生接受 iodata。这里只需要长度来编码 9-byte frame header，
+	%% 不应该为了发包先把 HPACK/SETTINGS/DATA 的 iolist 扁平化复制一遍。
+	frameSized(Type, StreamId, Payload, Flags, iolist_size(Payload)).
+
+frameSized(Type, StreamId, Payload, Flags, Size) ->
+	[<<Size:24, (typeNum(Type)):8, Flags:8, 0:1, StreamId:31>>, Payload].
 
 %% @doc 构造 SETTINGS frame，只携带本端想显式设定的项。
 %% 未列出的项保持当前值（双方初始都按协议默认值），因此对端无需回显
@@ -130,11 +131,11 @@ frame(Type, StreamId, Payload, Flags) ->
 %% @returns iolist
 -spec settingsFrame([{atom(), non_neg_integer()}]) -> iodata().
 settingsFrame(Settings) ->
-   frame(settings, 0, settingsBody(Settings)).
+	frame(settings, 0, settingsBody(Settings)).
 
 %% 每项 6 字节：2 字节标识符 + 4 字节无符号值（RFC 9113 6.5.1）。
 settingsBody(Settings) ->
-   [<<(settingId(K)):16, V:32>> || {K, V} <- Settings].
+	[<<(settingId(K)):16, V:32>> || {K, V} <- Settings].
 
 %% @doc 构造 SETTINGS 的 ACK 帧（负载为空 + ACK flag）。
 %% 收到对端 SETTINGS 后必须回 ACK，否则对端可能判定 settings_timeout。
@@ -145,7 +146,7 @@ ackFrame() -> frame(settings, 0, <<>>, ?FLAG_ACK).
 %% @param Data 8 字节 binary，原样由对端的 PONG 回显
 -spec pingFrame(binary()) -> iodata().
 pingFrame(Data) when byte_size(Data) =:= 8 ->
-   frame(ping, 0, Data).
+	frame(ping, 0, Data).
 
 %% @doc 构造 PING 响应帧（PONG）：回显对端的 8 字节数据并置 ACK flag。
 %% 带 ACK 的 PING 不得再被回应，否则会形成应答循环。
@@ -157,24 +158,24 @@ pongFrame(Data) -> frame(ping, 0, Data, ?FLAG_ACK).
 %% @param ErrorCode 关闭原因，原子或原始错误码整数
 -spec goawayFrame(non_neg_integer(), atom() | non_neg_integer()) -> iodata().
 goawayFrame(LastStreamId, ErrorCode) ->
-   %% 负载：R(1) + Last-Stream-ID(31) + Error Code(32)，其后可跟调试数据。
-   %% 保留位固定为 0，因此 stream id 只能占用低 31 位。
-   frame(goaway, 0, <<0:1, LastStreamId:31, (errorCodeNum(ErrorCode)):32>>).
+	%% 负载：R(1) + Last-Stream-ID(31) + Error Code(32)，其后可跟调试数据。
+	%% 保留位固定为 0，因此 stream id 只能占用低 31 位。
+	frame(goaway, 0, <<0:1, LastStreamId:31, (errorCodeNum(ErrorCode)):32>>).
 
 %% @doc 构造 WINDOW_UPDATE frame，为连接或单条 stream 增加流控窗口。
 %% @param StreamId 目标 stream；0 表示连接级窗口
 %% @param Increment 增量，必须为正（0 是协议错误），上限 2^31-1
 -spec windowUpdateFrame(non_neg_integer(), pos_integer()) -> iodata().
 windowUpdateFrame(StreamId, Increment) ->
-   %% 最高位为保留位（必须为 0），增量占低 31 位。
-   frame(window_update, StreamId, <<0:1, Increment:31>>).
+	%% 最高位为保留位（必须为 0），增量占低 31 位。
+	frame(window_update, StreamId, <<0:1, Increment:31>>).
 
 %% @doc 构造 RST_STREAM frame，立即终止一条 stream。
 %% @param StreamId 待终止的 stream；不得为 0（连接级错误用 GOAWAY）
 %% @param ErrorCode 错误原因，原子或原始错误码整数
 -spec rstStreamFrame(non_neg_integer(), atom() | non_neg_integer()) -> iodata().
 rstStreamFrame(StreamId, ErrorCode) ->
-   frame(rst_stream, StreamId, <<(errorCodeNum(ErrorCode)):32>>).
+	frame(rst_stream, StreamId, <<(errorCodeNum(ErrorCode)):32>>).
 
 %% @doc 把一个 HPACK header 块切成 HEADERS + 若干 CONTINUATION frame，
 %% 每帧负载不超过 `MaxFrame'，且只有最后一帧带 END_HEADERS。
@@ -185,54 +186,79 @@ rstStreamFrame(StreamId, ErrorCode) ->
 %% @returns 可直接发送的 iolist
 -spec headersFrames(HeaderBlock, StreamId, MaxFrame) -> iodata() when HeaderBlock :: iodata(), StreamId :: pos_integer(), MaxFrame :: pos_integer().
 headersFrames(Block, StreamId, MaxFrame) ->
-   headersFrames(Block, StreamId, MaxFrame, false).
+	headersFrames(Block, StreamId, MaxFrame, false).
 
 %% @doc 构造响应HEADERS。EndStream=true时END_STREAM只出现在首个HEADERS帧；
 %% CONTINUATION只能承载END_HEADERS，且整个header block连续发送。
 -spec headersFrames(HeaderBlock, StreamId, MaxFrame, EndStream) -> iodata()
-   when HeaderBlock :: iodata(), StreamId :: pos_integer(),
-      MaxFrame :: pos_integer(), EndStream :: boolean().
+	when HeaderBlock :: iodata(), StreamId :: pos_integer(),
+	MaxFrame :: pos_integer(), EndStream :: boolean().
 headersFrames(Block, StreamId, MaxFrame, EndStream) ->
-   BaseFlags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
-   case splitPayload(iolist_to_binary(Block), MaxFrame) of
-      [] -> frame(headers, StreamId, <<>>, BaseFlags bor ?FLAG_END_HEADERS);
-      [Last] -> frame(headers, StreamId, Last, BaseFlags bor ?FLAG_END_HEADERS);
-      [First | Rest] ->
-         N = length(Rest),
-         Conts = [begin
-            Flags = case I =:= N of true -> ?FLAG_END_HEADERS; false -> 0 end,
-            frame(continuation, StreamId, Chunk, Flags)
-         end || {I, Chunk} <- lists:zip(lists:seq(1, N), Rest)],
-         [frame(headers, StreamId, First, BaseFlags) | Conts]
-   end.
+	BaseFlags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
+	Size = iolist_size(Block),
+	case Size =< MaxFrame of
+		true ->
+			%% 绝大多数 HPACK block 只有几百字节。frame/4 原生接受 iodata，
+			%% 不要为了单个 HEADERS frame 先把整个 HPACK iolist 复制成 binary。
+			frameSized(headers, StreamId, Block, BaseFlags bor ?FLAG_END_HEADERS, Size);
+		false ->
+			%% 只有真的需要 CONTINUATION 时才扁平化，便于按字节边界切分。
+			[First | Rest] = splitPayload(iolist_to_binary(Block), MaxFrame),
+			[frame(headers, StreamId, First, BaseFlags) |
+				continuationFrames(Rest, StreamId)]
+	end.
+
+continuationFrames([Last], StreamId) ->
+	[frame(continuation, StreamId, Last, ?FLAG_END_HEADERS)];
+continuationFrames([Chunk | Rest], StreamId) ->
+	[frame(continuation, StreamId, Chunk, 0) | continuationFrames(Rest, StreamId)].
 
 %% @doc 把消息体切成 DATA frame 序列，最后一帧带 END_STREAM。
 %% 空 body 也要发一个带 END_STREAM 的空 DATA，否则对端不知道响应已结束。
 %% @param Body 消息体
 %% @param MaxFrame 每帧负载上限
 -spec dataFrames(Body, StreamId, MaxFrame) -> iodata() when Body :: binary(), StreamId :: pos_integer(), MaxFrame :: pos_integer().
-dataFrames(<<>>, StreamId, _MaxFrame) ->
-   frame(data, StreamId, <<>>, ?FLAG_END_STREAM);
 dataFrames(Body, StreamId, MaxFrame) ->
-   Chunks = splitPayload(Body, MaxFrame),
-   N = length(Chunks),
-	[frame(data, StreamId, Chunk, case I =:= N of true -> ?FLAG_END_STREAM; false -> 0 end) || {I, Chunk} <- lists:zip(lists:seq(1, N), Chunks)].
+	dataFrames(Body, StreamId, MaxFrame, true).
+
+%% @doc 与 dataFrames/3 相同，但调用方可控制最后一帧是否带 END_STREAM。
+%% 用于 flow-control burst：一个 socket send 可以携带多帧，同时保持 stream 打开。
+-spec dataFrames(Body, StreamId, MaxFrame, EndStream) -> iodata()
+	when Body :: binary(), StreamId :: pos_integer(), MaxFrame :: pos_integer(), EndStream :: boolean().
+dataFrames(<<>>, StreamId, _MaxFrame, true) ->
+	frame(data, StreamId, <<>>, ?FLAG_END_STREAM);
+dataFrames(<<>>, _StreamId, _MaxFrame, false) ->
+	[];
+dataFrames(Body, StreamId, MaxFrame, EndStream) ->
+	dataFramesLoop(Body, StreamId, MaxFrame, EndStream).
+
+%% 已经切干净但 stream 不结束：不发空 DATA，避免纯粹多一个 9 字节 frame 头。
+dataFramesLoop(<<>>, _StreamId, _MaxFrame, false) ->
+	[];
+%% body 不超过一帧上限（含空 body 收尾）：直接发，按需要在末帧带 END_STREAM。
+dataFramesLoop(Bin, StreamId, MaxFrame, EndStream) when byte_size(Bin) =< MaxFrame ->
+	Flags = case EndStream of true -> ?FLAG_END_STREAM; false -> 0 end,
+	frame(data, StreamId, Bin, Flags);
+%% 超过一帧上限：切出满帧后继续，剩余部分的 END_STREAM 语义不变。
+dataFramesLoop(Bin, StreamId, MaxFrame, EndStream) ->
+	<<Chunk:MaxFrame/binary, Rest/binary>> = Bin,
+	[frame(data, StreamId, Chunk, 0) | dataFramesLoop(Rest, StreamId, MaxFrame, EndStream)].
 
 %% 把 binary 切成不超过 Max 字节的若干块（输入为空时才得到空列表）。
 -spec splitPayload(binary(), pos_integer()) -> [binary()].
 splitPayload(Bin, Max) when Max > 0 ->
-   splitLoop(Bin, Max, []).
+	splitLoop(Bin, Max, []).
 
 splitLoop(<<>>, _Max, Acc) -> lists:reverse(Acc);
 splitLoop(Bin, Max, Acc) ->
-   case Bin of
-      %% 按固定大小 Max 切块：够一块就递归处理剩余部分。
-      <<Chunk:Max/binary, Rest/binary>> ->
-         splitLoop(Rest, Max, [Chunk | Acc]);
-      _ ->
-         %% 不足一块的尾巴直接整体收尾。
-         lists:reverse([Bin | Acc])
-   end.
+	case Bin of
+		%% 按固定大小 Max 切块：够一块就递归处理剩余部分。
+		<<Chunk:Max/binary, Rest/binary>> ->
+			splitLoop(Rest, Max, [Chunk | Acc]);
+		_ ->
+			%% 不足一块的尾巴直接整体收尾。
+			lists:reverse([Bin | Acc])
+	end.
 
 %%====================================================================
 %% SETTINGS 负载编解码
@@ -244,17 +270,17 @@ splitLoop(Bin, Max, Acc) ->
 %% @returns `{ok, 列表}'；长度非 6 的倍数时返回 `{error, badSettingsLength}'
 -spec settingsDecode(binary()) -> {ok, [{atom(), non_neg_integer()}]} | {error, term()}.
 settingsDecode(Bin) when byte_size(Bin) rem 6 =:= 0 ->
-   settingsLoop(Bin, []);
+	settingsLoop(Bin, []);
 settingsDecode(_) ->
-   {error, badSettingsLength}.
+	{error, badSettingsLength}.
 
 %% RFC 9113 §6.5：SETTINGS 按出现顺序处理；同一 identifier 重复时
 %% 最后出现的值覆盖前值。这里直接 keystore，返回列表中每个 setting
 %% 最终只保留一个值，避免上层 proplists:get_value/3 误取旧值。
 settingsLoop(<<>>, Acc) -> {ok, Acc};
 settingsLoop(<<Id:16, V:32, Rest/binary>>, Acc) ->
-   Key = settingAtom(Id),
-   settingsLoop(Rest, lists:keystore(Key, 1, Acc, {Key, V})).
+	Key = settingAtom(Id),
+	settingsLoop(Rest, lists:keystore(Key, 1, Acc, {Key, V})).
 
 %%====================================================================
 %% frame 解析器
@@ -285,41 +311,41 @@ setMaxFrame(P, Max) -> P#{max_frame := Max}.
 %% @returns `{NewParser, [frame() | {error, term()}]}'
 -spec feed(parser(), binary()) -> {parser(), [frame() | {error, term()}]}.
 feed(#{buffer := <<>>} = P, Bin) ->
-   %% 完整帧是绝大多数稳态路径；buffer 为空时直接解析，避免一次无意义的
-   %% binary 拼接。只有跨 socket 边界的半帧才进入合并路径。
-   feedLoop(P, Bin, []);
+	%% 完整帧是绝大多数稳态路径；buffer 为空时直接解析，避免一次无意义的
+	%% binary 拼接。只有跨 socket 边界的半帧才进入合并路径。
+	feedLoop(P, Bin, []);
 feed(#{buffer := Buf} = P, Bin) ->
-   feedLoop(P#{buffer := <<>>}, <<Buf/binary, Bin/binary>>, []).
+	feedLoop(P#{buffer := <<>>}, <<Buf/binary, Bin/binary>>, []).
 
 feedLoop(P, Bin, Acc) ->
-   case Bin of
-      %% 帧头 Stream Identifier 的最高位是保留位，接收端必须忽略
-      %% （RFC 9113 §4.1），不能因对端置 1 而断开连接。
-      <<Size:24, Type:8, Flags:8, _Reserved:1, StreamId:31, Rest/binary>> ->
-         Max = maps:get(max_frame, P),
-         if
-         %% 超过我们通告的上限即 frame_size_error：不清空就无法
-         %% 知道下一帧从哪开始，连接只能放弃。
-            Size > Max ->
-               {P#{buffer := <<>>}, lists:reverse([{error, {frameTooLarge, Size}} | Acc])};
-            true ->
-               case Rest of
-                  <<Payload:Size/binary, Rest2/binary>> ->
-                     feedLoop(P, Rest2, [{frame, typeAtom(Type), Flags, StreamId, Payload} | Acc]);
-                  _ ->
-                     %% 负载还没收全：整个前缀（含 frame 头）留在
-                     %% buffer 里，等下次 feed 时重新解析。
-                     {P#{buffer := Bin}, lists:reverse(Acc)}
-               end
-         end;
-      _ when byte_size(Bin) < 9 ->
-         %% 连 9 字节 frame 头都不够，直接等更多字节。
-         {P#{buffer := Bin}, lists:reverse(Acc)};
-      _ ->
-         %% 9 字节以上必能由上面的固定宽度帧头模式匹配；此分支仅作
-         %% 防御性兜底，保留原始数据等待下一次输入。
-         {P#{buffer := Bin}, lists:reverse(Acc)}
-   end.
+	case Bin of
+		%% 帧头 Stream Identifier 的最高位是保留位，接收端必须忽略
+		%% （RFC 9113 §4.1），不能因对端置 1 而断开连接。
+		<<Size:24, Type:8, Flags:8, _Reserved:1, StreamId:31, Rest/binary>> ->
+			Max = maps:get(max_frame, P),
+			if
+			%% 超过我们通告的上限即 frame_size_error：不清空就无法
+			%% 知道下一帧从哪开始，连接只能放弃。
+				Size > Max ->
+					{P#{buffer := <<>>}, lists:reverse([{error, {frameTooLarge, Size}} | Acc])};
+				true ->
+					case Rest of
+						<<Payload:Size/binary, Rest2/binary>> ->
+							feedLoop(P, Rest2, [{frame, typeAtom(Type), Flags, StreamId, Payload} | Acc]);
+						_ ->
+							%% 负载还没收全：整个前缀（含 frame 头）留在
+							%% buffer 里，等下次 feed 时重新解析。
+							{P#{buffer := Bin}, lists:reverse(Acc)}
+					end
+			end;
+		_ when byte_size(Bin) < 9 ->
+			%% 连 9 字节 frame 头都不够，直接等更多字节。
+			{P#{buffer := Bin}, lists:reverse(Acc)};
+		_ ->
+			%% 9 字节以上必能由上面的固定宽度帧头模式匹配；此分支仅作
+			%% 防御性兜底，保留原始数据等待下一次输入。
+			{P#{buffer := Bin}, lists:reverse(Acc)}
+	end.
 
 %%====================================================================
 %% 负载字段解析（位布局只在这里出现一次）
@@ -329,7 +355,7 @@ feedLoop(P, Bin, Acc) ->
 %% @returns `{ok, LastStreamId, ErrorCode, DebugData}'
 -spec goawayFields(binary()) -> {ok, non_neg_integer(), atom() | integer(), binary()} | {error, term()}.
 goawayFields(<<_:1, LastStreamId:31, Code:32, Debug/binary>>) ->
-   {ok, LastStreamId, errorCodeAtom(Code), Debug};
+	{ok, LastStreamId, errorCodeAtom(Code), Debug};
 goawayFields(_) -> {error, badGoaway}.
 
 %% PING 负载必须是 8 字节不透明数据，长度不符即为 frame_size_error。
@@ -356,9 +382,9 @@ rstStreamCode(_) -> {error, badRstStream}.
 %% @returns `{ok, Exclusive, DepStreamId, Weight, 剩余字节}'
 -spec priorityFields(binary()) -> {ok, Exclusive :: boolean(), DepStreamId :: non_neg_integer(), Weight :: non_neg_integer(), Rest :: binary()} | {error, term()}.
 priorityFields(<<E:1, Dep:31, W:8, Rest/binary>>) ->
-   {ok, E =:= 1, Dep, W, Rest};
+	{ok, E =:= 1, Dep, W, Rest};
 priorityFields(_) ->
-   {error, badPriority}.
+	{error, badPriority}.
 
 %%====================================================================
 %% 查表

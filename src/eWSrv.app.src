@@ -1,11 +1,11 @@
 {application, eWSrv,
-   [{description, "erlang http1.1 server"},
-      {vsn, "0.1.0"},
-      {registered, []},
-      {mod, {eWSrv_app, []}},
-      {applications, [kernel, stdlib, crypto, ssl, eNet]},
-      {env, []},
-      {modules, []},
-      {licenses, ["MIT"]},
-      {links, []}
-   ]}.
+	[{description, "Erlang HTTP/1.1, HTTP/2 and WebSocket server"},
+		{vsn, "0.1.0"},
+		{registered, []},
+		{mod, {eWSrv_app, []}},
+		{applications, [kernel, stdlib, crypto, ssl, eNet]},
+		{env, []},
+		{modules, []},
+		{licenses, ["MIT"]},
+		{links, []}
+	]}.

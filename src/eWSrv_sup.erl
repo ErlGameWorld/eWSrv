@@ -9,10 +9,10 @@
 -define(SERVER, ?MODULE).
 
 start_link() ->
-   supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+	supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 init([]) ->
-   SupFlags = #{strategy => one_for_all, intensity => 100, period => 3600},
-   ChildSpecs = [],
-   {ok, {SupFlags, ChildSpecs}}.
+	SupFlags = #{strategy => one_for_all, intensity => 100, period => 3600},
+	ChildSpecs = [],
+	{ok, {SupFlags, ChildSpecs}}.
 

@@ -33,27 +33,27 @@
 %% @doc Decode a Huffman-encoded binary back to plain bytes.
 -spec decode(binary()) -> binary().
 decode(Bin) when is_binary(Bin) ->
-    case decodeNibbles(Bin, 0, ?Complete, []) of
-        {ok, Acc} -> iolist_to_binary(lists:reverse(Acc));
-        {error, Reason} -> erlang:error({huffman, Reason})
-    end.
+	case decodeNibbles(Bin, 0, ?Complete, []) of
+		{ok, Acc} -> iolist_to_binary(lists:reverse(Acc));
+		{error, Reason} -> erlang:error({huffman, Reason})
+	end.
 
 %% @doc Huffman-encode a plain binary; trailing padding is the EOS prefix.
 -spec encode(binary()) -> binary().
 encode(Bin) when is_binary(Bin) ->
-    {Bytes, Val, NBits} = encodeLoop(Bin, [], 0, 0),
-    case NBits of
-        0 ->
-            iolist_to_binary(lists:reverse(Bytes));
-        _ ->
-            Pad = (Val bsl (8 - NBits)) bor ((1 bsl (8 - NBits)) - 1),
-            iolist_to_binary(lists:reverse([Pad | Bytes]))
-    end.
+	{Bytes, Val, NBits} = encodeLoop(Bin, [], 0, 0),
+	case NBits of
+		0 ->
+			iolist_to_binary(lists:reverse(Bytes));
+		_ ->
+			Pad = (Val bsl (8 - NBits)) bor ((1 bsl (8 - NBits)) - 1),
+			iolist_to_binary(lists:reverse([Pad | Bytes]))
+	end.
 
 %% @doc Byte length of `Bin' once Huffman-encoded, without building it.
 -spec encodeSize(binary()) -> non_neg_integer().
 encodeSize(Bin) when is_binary(Bin) ->
-    (encodeSizeLoop(Bin, 0) + 7) div 8.
+	(encodeSizeLoop(Bin, 0) + 7) div 8.
 
 %%%===================================================================
 %%% Decoding
@@ -63,58 +63,58 @@ encodeSize(Bin) when is_binary(Bin) ->
 %% Writing `case Flags band ?Fail of ?Fail -> ...; F -> ...' would bind F to
 %% the masked result (0), silently dropping the Emit/Complete bits.
 decodeNibbles(<<>>, _State, Flags, Acc) ->
-    case Flags band ?Complete of
-        ?Complete -> {ok, Acc};
-        _ -> {error, incomplete}
-    end;
+	case Flags band ?Complete of
+		?Complete -> {ok, Acc};
+		_ -> {error, incomplete}
+	end;
 decodeNibbles(<<H, Rest/binary>>, State0, _Flags, Acc) ->
-    {S1, F1, B1} = tab((State0 bsl 4) bor (H bsr 4)),
-    case F1 band ?Fail of
-        ?Fail ->
-            {error, fail};
-        _ ->
-            Acc1 = case F1 band ?Emit of
-                       ?Emit -> [B1 | Acc];
-                       _ -> Acc
-                   end,
-            {S2, F2, B2} = tab((S1 bsl 4) bor (H band 16#F)),
-            case F2 band ?Fail of
-                ?Fail ->
-                    {error, fail};
-                _ ->
-                    Acc2 = case F2 band ?Emit of
-                               ?Emit -> [B2 | Acc1];
-                               _ -> Acc1
-                           end,
-                    decodeNibbles(Rest, S2, F2, Acc2)
-            end
-    end.
+	{S1, F1, B1} = tab((State0 bsl 4) bor (H bsr 4)),
+	case F1 band ?Fail of
+		?Fail ->
+			{error, fail};
+		_ ->
+			Acc1 = case F1 band ?Emit of
+				?Emit -> [B1 | Acc];
+				_ -> Acc
+			end,
+			{S2, F2, B2} = tab((S1 bsl 4) bor (H band 16#F)),
+			case F2 band ?Fail of
+				?Fail ->
+					{error, fail};
+				_ ->
+					Acc2 = case F2 band ?Emit of
+						?Emit -> [B2 | Acc1];
+						_ -> Acc1
+					end,
+					decodeNibbles(Rest, S2, F2, Acc2)
+			end
+	end.
 
 %%%===================================================================
 %%% Encoding
 %%%===================================================================
 
 encodeLoop(<<>>, Acc, Val, NBits) ->
-    {Acc, Val, NBits};
+	{Acc, Val, NBits};
 encodeLoop(<<B, Rest/binary>>, Acc, Val, NBits) ->
-    {Val1, NBits1, Acc1} = pushBits(Val, NBits, B, Acc),
-    encodeLoop(Rest, Acc1, Val1, NBits1).
+	{Val1, NBits1, Acc1} = pushBits(Val, NBits, B, Acc),
+	encodeLoop(Rest, Acc1, Val1, NBits1).
 
 pushBits(Val, NBits, Sym, Acc) ->
-    {Code, Len} = enc(Sym),
-    pushBytes((Val bsl Len) bor Code, NBits + Len, Acc).
+	{Code, Len} = enc(Sym),
+	pushBytes((Val bsl Len) bor Code, NBits + Len, Acc).
 
 pushBytes(Val, NBits, Acc) when NBits >= 8 ->
-    Rest = NBits - 8,
-    pushBytes(Val band ((1 bsl Rest) - 1), Rest, [(Val bsr Rest) band 16#FF | Acc]);
+	Rest = NBits - 8,
+	pushBytes(Val band ((1 bsl Rest) - 1), Rest, [(Val bsr Rest) band 16#FF | Acc]);
 pushBytes(Val, NBits, Acc) ->
-    {Val, NBits, Acc}.
+	{Val, NBits, Acc}.
 
 encodeSizeLoop(<<>>, Total) ->
-    Total;
+	Total;
 encodeSizeLoop(<<B, Rest/binary>>, Total) ->
-    {_, Len} = enc(B),
-    encodeSizeLoop(Rest, Total + Len).
+	{_, Len} = enc(B),
+	encodeSizeLoop(Rest, Total + Len).
 
 %%%===================================================================
 %%% 配置表：解码状态机 tab/1（4096 项）
